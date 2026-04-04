@@ -57,13 +57,37 @@ const quietMode = new Map<string, boolean>();
 const processedIds = new Set<number>();
 let processing = false;
 
+async function killDuplicateProcesses(): Promise<void> {
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  const execFileAsync = promisify(execFile);
+
+  try {
+    const { stdout } = await execFileAsync("pgrep", ["-f", "JuneClaw/dist/index"]);
+    const pids = stdout.trim().split("\n").map(Number).filter((p) => p !== process.pid);
+    for (const pid of pids) {
+      log(`Killing duplicate daemon process (PID ${pid})`);
+      try { process.kill(pid, "SIGTERM"); } catch { /* already dead */ }
+    }
+    if (pids.length > 0) {
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+  } catch {
+    // pgrep returns exit 1 when no matches — normal
+  }
+}
+
 async function acquirePidLock(): Promise<void> {
   await mkdir(dirname(config.paths.pidFile), { recursive: true });
 
+  // Phase 1: Kill any other node process running JuneClaw (catches tmux, old paths, etc.)
+  await killDuplicateProcesses();
+
+  // Phase 2: PID file check (catches same-path duplicates)
   try {
     const existing = await readFile(config.paths.pidFile, "utf-8");
     const pid = parseInt(existing.trim(), 10);
-    if (!isNaN(pid)) {
+    if (!isNaN(pid) && pid !== process.pid) {
       try {
         process.kill(pid, 0);
         console.error(

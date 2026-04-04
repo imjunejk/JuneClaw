@@ -6,12 +6,23 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 SESSION="juneclaw"
 LOG_FILE="$HOME/.juneclaw/logs/daemon.log"
 STATE_FILE="$HOME/.juneclaw/state.json"
+PLIST_NAME="ai.juneclaw.daemon"
 
 # Create log dir if needed
 mkdir -p "$HOME/.juneclaw/logs"
 touch "$LOG_FILE"
 
-# Kill existing session if any
+# Stop launchd daemon first to prevent duplicate instances
+if launchctl list "$PLIST_NAME" &>/dev/null; then
+  echo "Stopping launchd daemon ($PLIST_NAME) to avoid duplicate..."
+  launchctl unload "$HOME/Library/LaunchAgents/$PLIST_NAME.plist" 2>/dev/null || true
+  sleep 1
+fi
+
+# Kill any existing JuneClaw node processes
+pkill -f "JuneClaw/dist/index" 2>/dev/null || true
+
+# Kill existing tmux session if any
 if tmux has-session -t "$SESSION" 2>/dev/null; then
   echo "Session '$SESSION' already exists. Attaching..."
   exec tmux attach-session -t "$SESSION"
