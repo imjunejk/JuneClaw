@@ -28,7 +28,14 @@ sed \
   "$TEMPLATE" > "$PLIST_DEST"
 echo "  Wrote $PLIST_DEST"
 
-# 4. Bootout existing if present
+# 4. Kill any running JuneClaw processes (tmux, manual, old paths)
+if pgrep -f "JuneClaw/dist/index" >/dev/null 2>&1; then
+  echo "  Killing existing JuneClaw processes..."
+  pkill -f "JuneClaw/dist/index" 2>/dev/null || true
+  sleep 1
+fi
+
+# 5. Bootout existing launchd daemon if present
 if launchctl print "gui/$(id -u)/$PLIST_NAME" &>/dev/null; then
   echo "  Removing existing daemon..."
   launchctl bootout "gui/$(id -u)/$PLIST_NAME" 2>/dev/null || true
