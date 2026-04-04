@@ -17,8 +17,8 @@ cd "$PROJECT_DIR"
 npm run build
 
 # 2. Create directories
-mkdir -p "$HOME_DIR/.clawd/logs"
-echo "  Created ~/.clawd/logs/"
+mkdir -p "$HOME_DIR/.juneclaw/logs"
+echo "  Created ~/.juneclaw/logs/"
 
 # 3. Generate plist from template
 sed \
@@ -50,6 +50,6 @@ else
 fi
 
 echo "==> JuneClaw daemon installed and running"
-echo "    Logs: ~/.clawd/logs/daemon.log"
-echo "    State: ~/.clawd/state.json"
+echo "    Logs: ~/.juneclaw/logs/daemon.log"
+echo "    State: ~/.juneclaw/state.json"
 echo "    Watchdog: crontab */5 * * * *"

@@ -4,10 +4,10 @@ import { join } from "node:path";
 const home = homedir();
 
 export const config = {
-  workspace: process.env.CLAWD_WORKSPACE ?? join(home, "openclaw"),
+  workspace: process.env.JUNECLAW_WORKSPACE ?? join(home, "openclaw"),
   channels: {
     june: {
-      phone: process.env.CLAWD_JUNE_PHONE ?? "+12139992143",
+      phone: process.env.JUNECLAW_JUNE_PHONE ?? "+12139992143",
       chatId: 1,
       name: "June",
       quietHours: { start: 23, end: 6 },
@@ -29,19 +29,19 @@ export const config = {
       "TodoWrite",
     ],
     timeoutMs: 180_000,
-    model: process.env.CLAWD_MODEL,
+    model: process.env.JUNECLAW_MODEL,
   },
   poll: {
     intervalMs: 2000,
     heartbeatIntervalMs: 10 * 60 * 1000,
   },
   paths: {
-    sessions: join(home, ".clawd", "sessions.json"),
-    lastSeen: join(home, ".clawd", "last-seen.json"),
-    logs: join(home, ".clawd", "logs"),
-    statePath: join(home, ".clawd", "state.json"),
-    pidFile: join(home, ".clawd", "daemon.pid"),
-    watchdogState: join(home, ".clawd", "watchdog-state.txt"),
+    sessions: join(home, ".juneclaw", "sessions.json"),
+    lastSeen: join(home, ".juneclaw", "last-seen.json"),
+    logs: join(home, ".juneclaw", "logs"),
+    statePath: join(home, ".juneclaw", "state.json"),
+    pidFile: join(home, ".juneclaw", "daemon.pid"),
+    watchdogState: join(home, ".juneclaw", "watchdog-state.txt"),
   },
   subAgents: {
     maxConcurrent: 5,

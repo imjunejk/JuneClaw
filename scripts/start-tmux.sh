@@ -4,11 +4,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 SESSION="juneclaw"
-LOG_FILE="$HOME/.clawd/logs/daemon.log"
-STATE_FILE="$HOME/.clawd/state.json"
+LOG_FILE="$HOME/.juneclaw/logs/daemon.log"
+STATE_FILE="$HOME/.juneclaw/state.json"
 
 # Create log dir if needed
-mkdir -p "$HOME/.clawd/logs"
+mkdir -p "$HOME/.juneclaw/logs"
 touch "$LOG_FILE"
 
 # Kill existing session if any

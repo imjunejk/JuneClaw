@@ -15,11 +15,11 @@
 set -uo pipefail
 
 # ── Config ────────────────────────────────────────────────────────────────
-CLAWD_HOME="$HOME/.clawd"
+JUNECLAW_HOME="$HOME/.juneclaw"
 PROJECT_DIR="$HOME/JuneClaw"
-PID_FILE="$CLAWD_HOME/daemon.pid"
-LOG_DIR="$CLAWD_HOME/logs"
-STATE_FILE="$CLAWD_HOME/watchdog-state.txt"
+PID_FILE="$JUNECLAW_HOME/daemon.pid"
+LOG_DIR="$JUNECLAW_HOME/logs"
+STATE_FILE="$JUNECLAW_HOME/watchdog-state.txt"
 IMSG_TARGET="+12139992143"
 MAX_LOG_LINES=1000
 LOG="$LOG_DIR/self-heal-watchdog.log"

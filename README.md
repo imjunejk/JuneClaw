@@ -1,4 +1,4 @@
-# clawd
+# JuneClaw
 
 Personal AI assistant daemon — routes iMessage conversations through Claude CLI (`claude --print`) with persistent memory and session continuity.
 
@@ -14,8 +14,8 @@ Replaces OpenClaw by using Claude Code CLI directly with a Max subscription.
 ## Setup
 
 ```bash
-git clone <repo> ~/projects/clawd
-cd ~/projects/clawd
+git clone <repo> ~/JuneClaw
+cd ~/JuneClaw
 npm install
 npm run build
 ```
@@ -26,8 +26,9 @@ Environment variables (or defaults):
 
 | Variable | Default | Description |
 |---|---|---|
-| `CLAWD_WORKSPACE` | `~/openclaw` | Path to memory workspace (SOUL.md, USER.md, etc.) |
-| `CLAWD_IMESSAGE_PHONE` | `+12139992143` | Phone number to monitor |
+| `JUNECLAW_WORKSPACE` | `~/openclaw` | Path to memory workspace (SOUL.md, USER.md, etc.) |
+| `JUNECLAW_JUNE_PHONE` | `+12139992143` | Phone number to monitor |
+| `JUNECLAW_MODEL` | (none) | Claude model override |
 
 ## Workspace Layout
 
@@ -76,8 +77,8 @@ The daemon will:
 ### Logs
 
 ```bash
-tail -f ~/.clawd/logs/daemon.log
-tail -f ~/.clawd/logs/daemon.err
+tail -f ~/.juneclaw/logs/daemon.log
+tail -f ~/.juneclaw/logs/daemon.err
 ```
 
 ## Architecture
@@ -96,6 +97,6 @@ iMessage (imsg CLI)
 
 ## State files
 
-- `~/.clawd/sessions.json` — Claude session IDs (for `--resume`)
-- `~/.clawd/last-seen.json` — Last processed iMessage ID
-- `~/.clawd/logs/` — Daemon stdout/stderr logs
+- `~/.juneclaw/sessions.json` — Claude session IDs (for `--resume`)
+- `~/.juneclaw/last-seen.json` — Last processed iMessage ID
+- `~/.juneclaw/logs/` — Daemon stdout/stderr logs
