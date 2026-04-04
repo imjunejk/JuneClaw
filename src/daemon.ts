@@ -1,5 +1,9 @@
 import { writeFile, readFile, unlink, mkdir } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { dirname } from "node:path";
+
+const execFileAsync = promisify(execFile);
 import { config, type ChannelConfig } from "./config.js";
 import { createIMessageChannel } from "./gateway/imessage.js";
 import { handleCommand } from "./gateway/commands.js";
@@ -58,22 +62,36 @@ const processedIds = new Set<number>();
 let processing = false;
 
 async function killDuplicateProcesses(): Promise<void> {
-  const { execFile } = await import("node:child_process");
-  const { promisify } = await import("node:util");
-  const execFileAsync = promisify(execFile);
-
   try {
     const { stdout } = await execFileAsync("pgrep", ["-f", "JuneClaw/dist/index"]);
     const pids = stdout.trim().split("\n").map(Number).filter((p) => p !== process.pid);
+    if (pids.length === 0) return;
+
     for (const pid of pids) {
       log(`Killing duplicate daemon process (PID ${pid})`);
       try { process.kill(pid, "SIGTERM"); } catch { /* already dead */ }
     }
-    if (pids.length > 0) {
-      await new Promise((r) => setTimeout(r, 1000));
+
+    // Wait for processes to actually exit (poll up to 5s)
+    for (let i = 0; i < 10; i++) {
+      await new Promise((r) => setTimeout(r, 500));
+      const alive = pids.filter((pid) => {
+        try { process.kill(pid, 0); return true; } catch { return false; }
+      });
+      if (alive.length === 0) break;
+      if (i === 9) {
+        for (const pid of alive) {
+          log(`Force killing daemon process (PID ${pid})`);
+          try { process.kill(pid, "SIGKILL"); } catch { /* already dead */ }
+        }
+      }
     }
-  } catch {
+  } catch (err) {
     // pgrep returns exit 1 when no matches — normal
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes("ENOENT")) {
+      log("[warn] pgrep not found — duplicate detection unavailable");
+    }
   }
 }
 
