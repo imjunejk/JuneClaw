@@ -8,12 +8,12 @@ import { config, type ChannelConfig } from "./config.js";
 import { createIMessageChannel } from "./gateway/imessage.js";
 import { handleCommand } from "./gateway/commands.js";
 import { runClaude } from "./agent/runner.js";
-import { getSessionId, setSessionId } from "./agent/session.js";
+import { getSessionId, setSessionId, clearSessionId } from "./agent/session.js";
 import { buildSystemPrompt } from "./memory/loader.js";
 import { appendDailyLog, appendSystemLog } from "./memory/writer.js";
 import { addJob, stopAll as stopAllCron } from "./scheduler/cron.js";
 import { cascadeKill, cleanupStaleAgents, archiveCompleted } from "./agent/subagents.js";
-import { writeHandoff } from "./memory/handoff.js";
+import { writeHandoff, writeSmartHandoff } from "./memory/handoff.js";
 import { emit } from "./hooks/events.js";
 import { logFromError } from "./hooks/incident.js";
 import {
@@ -24,7 +24,10 @@ import {
   recordUsage,
   shouldRotate,
   shouldWarnContext,
+  shouldHandoff,
+  markHandoffDone,
   executeRotation,
+  resetRotationState,
   getMessageCount,
 } from "./agent/context-rotation.js";
 import {
@@ -243,7 +246,7 @@ async function processMessage(
     await appendDailyLog(name, text, result.response);
     await emit("message:responded", { to: name });
 
-    // Check token-based and message-count rotation after processing
+    // Phase 1: Early warning (60%)
     if (shouldWarnContext(phone) && result.usage) {
       log(`[context] warning: ${result.usage.usagePercent.toFixed(1)}% context used`);
       await channel.sendMessage(
@@ -251,6 +254,44 @@ async function processMessage(
       );
     }
 
+    // Phase 2: Smart handoff (78%) — Claude writes HANDOFF.md from session context
+    if (shouldHandoff(phone) && result.sessionId) {
+      const pct = result.usage?.usagePercent.toFixed(0) ?? "?";
+      log(`[handoff] context ${pct}% — requesting smart handoff from Claude`);
+      await channel.sendMessage(
+        `[Context ${pct}%] 핸드오프 준비 중...`,
+      );
+      try {
+        const handoffResult = await writeSmartHandoff(result.sessionId!);
+        if (handoffResult.usage) {
+          recordUsage(phone, handoffResult.usage);
+          log(`[handoff] used ${handoffResult.usage.totalTokens.toLocaleString()} additional tokens`);
+        }
+        markHandoffDone(phone);
+        log("[handoff] HANDOFF.md written by Claude");
+
+        // Reset session directly — do NOT call executeRotation (it overwrites HANDOFF.md)
+        await clearSessionId(phone);
+        await appendSystemLog(
+          `Smart handoff completed for ${phone}: context ${pct}%`,
+        );
+        resetRotationState(phone);
+        await emit("rotation:triggered", { reason: "smart_handoff" });
+        await channel.sendMessage(
+          `핸드오프 완료. 다음 메시지부터 새 세션으로 시작합니다.`,
+        );
+      } catch (err) {
+        logError("[handoff] smart handoff failed, falling back to basic", err);
+        markHandoffDone(phone);
+        // Write basic handoff + rotate immediately so session doesn't continue degraded
+        await executeRotation(phone, "token_threshold");
+        await channel.sendMessage(
+          `핸드오프 실패 — 기본 핸드오프로 세션을 리셋합니다.`,
+        );
+      }
+    }
+
+    // Phase 3: Force rotation (90%) — fallback if handoff didn't trigger or was skipped
     const postReason = shouldRotate(phone);
     if (postReason) {
       log(`[context-rotation] triggered after processing: ${postReason}`);
