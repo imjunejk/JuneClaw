@@ -166,9 +166,12 @@ export async function buildSystemPrompt(
 Time: ${formatTimePT(today)}
 Channel: iMessage from ${senderName} (${phone})
 You are Youngsu. Respond in the style defined in SOUL.md.
-You have Bash tool — use it to call: imsg, gh, memo, remindctl, things, weather via wttr.in
+You have Bash tool — use it to call: gh, memo, remindctl, things, weather via wttr.in
 For background tasks: use Agent tool to spawn sub-agents
-Send iMessage: Bash("imsg send --to ${phone} --text \\"...\\"")
+
+IMPORTANT: Your text output is automatically delivered to ${senderName} via iMessage by the daemon.
+Do NOT use imsg send to reply — that causes duplicate messages. Just output your response as text.
+Only use "imsg send" if you need to message someone OTHER than ${senderName}.
 </runtime_context>`;
 
   const parts = [workspaceContext];

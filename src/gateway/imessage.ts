@@ -61,9 +61,22 @@ export function createIMessageChannel(
         .filter(Boolean)
         .map((line: string) => JSON.parse(line));
 
+      // Advance lastSeenId past ALL messages (including our own) to prevent re-ingestion
+      const maxIdAll = messages.length > 0
+        ? Math.max(...messages.map((m) => m.id))
+        : lastSeenId!;
+
       const newMessages = messages
         .filter((m) => m.id > lastSeenId! && !m.is_from_me && m.text)
         .sort((a, b) => a.id - b.id);
+
+      // Also advance past our own messages so they're never re-polled
+      if (newMessages.length === 0 && maxIdAll > lastSeenId!) {
+        lastSeenId = maxIdAll;
+        const store = await loadLastSeenStore();
+        store[String(chatId)] = maxIdAll;
+        await saveLastSeenStore(store);
+      }
 
       if (newMessages.length > 0) {
         const maxId = Math.max(...newMessages.map((m) => m.id));

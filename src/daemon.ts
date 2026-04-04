@@ -157,9 +157,16 @@ async function processMessage(
     };
   }
 
-  log(`[response] ${result.response.slice(0, 80)}...`);
-  await channel.sendMessage(result.response);
-  await appendDailyLog(name, text, result.response);
+  const response = result.response.trim();
+
+  // Skip empty or suppressed responses
+  if (!response || response === "HEARTBEAT_OK" || response === "NO_REPLY") {
+    log(`[response] suppressed: ${response || "(empty)"}`);
+  } else {
+    log(`[response] ${response.slice(0, 80)}...`);
+    await channel.sendMessage(response);
+  }
+  await appendDailyLog(name, text, response);
 }
 
 async function runHeartbeat(
@@ -176,7 +183,7 @@ async function runHeartbeat(
     const systemPrompt = await buildSystemPrompt("heartbeat", name);
     const sessionId = await getSessionId(phone);
 
-    const prompt = `HEARTBEAT: Check HEARTBEAT.md and follow it. Current time: ${now.toISOString()}. Reply HEARTBEAT_OK if nothing needs attention, otherwise take action.`;
+    const prompt = `HEARTBEAT: Check HEARTBEAT.md and follow it. Current time: ${now.toISOString()}. Reply HEARTBEAT_OK if nothing needs attention, otherwise take action. Do NOT send any iMessages yourself — just return your text response.`;
 
     const result = await runClaude({ prompt, systemPrompt, sessionId });
 
