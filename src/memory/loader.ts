@@ -123,6 +123,21 @@ export async function buildSystemPrompt(
     { label: "AGENTS", path: join(ws, "AGENTS.md"), maxChars: 5000 },
     { label: "SUB_AGENTS", path: join(ws, "SUB_AGENTS.md"), maxChars: 10000 },
     {
+      label: "OPERATING PRINCIPLES",
+      path: join(ws, "docs", "operating-principles.md"),
+      maxChars: 5000,
+    },
+    {
+      label: "SESSION MANAGEMENT",
+      path: join(ws, "docs", "session-management.md"),
+      maxChars: 4000,
+    },
+    {
+      label: "COMMUNICATION RULES",
+      path: join(ws, "docs", "communication-rules.md"),
+      maxChars: 5000,
+    },
+    {
       label: "MASTER RULES",
       path: join(ws, "memory", "lessons", "master-rules.md"),
       maxChars: 10000,
@@ -190,6 +205,23 @@ export async function buildSystemPrompt(
         }
       }
     }
+  }
+
+  // Load skill definitions from .openclaw/skills/
+  const skillsDir = join(ws, ".openclaw", "skills");
+  try {
+    const skillDirs = await readdir(skillsDir);
+    for (const skillName of skillDirs) {
+      const skillPath = join(skillsDir, skillName, "SKILL.md");
+      const content = await loadFileOrNull(skillPath);
+      if (content) {
+        sections.push(
+          `## SKILL: ${skillName}\n${truncate(content.trim(), 2000)}`,
+        );
+      }
+    }
+  } catch {
+    // No skills directory
   }
 
   // Add most recent weekly/monthly summaries for long-term memory
