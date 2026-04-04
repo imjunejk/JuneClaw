@@ -4,38 +4,40 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 HOME_DIR="$HOME"
-PLIST_NAME="ai.clawd.daemon"
+NODE_BIN="$(which node)"
+PLIST_NAME="ai.juneclaw.daemon"
 PLIST_DEST="$HOME_DIR/Library/LaunchAgents/$PLIST_NAME.plist"
 TEMPLATE="$PROJECT_DIR/launchd/$PLIST_NAME.plist.template"
 
-echo "==> clawd daemon installer"
+echo "==> JuneClaw daemon installer"
 
-# Check dist exists
-if [ ! -f "$PROJECT_DIR/dist/index.js" ]; then
-  echo "ERROR: dist/index.js not found. Run 'npm run build' first."
-  exit 1
-fi
+# 1. Build
+echo "  Building TypeScript..."
+cd "$PROJECT_DIR"
+npm run build
 
-# Create log directory
+# 2. Create directories
 mkdir -p "$HOME_DIR/.clawd/logs"
 echo "  Created ~/.clawd/logs/"
 
-# Unload existing if present
-if launchctl list | grep -q "$PLIST_NAME" 2>/dev/null; then
-  echo "  Unloading existing daemon..."
-  launchctl unload "$PLIST_DEST" 2>/dev/null || true
-fi
-
-# Generate plist from template
+# 3. Generate plist from template
 sed \
   -e "s|INSTALL_PATH|$PROJECT_DIR|g" \
   -e "s|HOME_PATH|$HOME_DIR|g" \
+  -e "s|NODE_BIN|$NODE_BIN|g" \
   "$TEMPLATE" > "$PLIST_DEST"
-
 echo "  Wrote $PLIST_DEST"
 
-# Load daemon
-launchctl load "$PLIST_DEST"
-echo "  Loaded $PLIST_NAME"
+# 4. Bootout existing if present
+if launchctl print "gui/$(id -u)/$PLIST_NAME" &>/dev/null; then
+  echo "  Removing existing daemon..."
+  launchctl bootout "gui/$(id -u)/$PLIST_NAME" 2>/dev/null || true
+fi
 
-echo "==> Done! Check logs at ~/.clawd/logs/"
+# 5. Bootstrap new daemon
+launchctl bootstrap "gui/$(id -u)" "$PLIST_DEST"
+echo "  Bootstrapped $PLIST_NAME"
+
+echo "==> JuneClaw daemon installed and running"
+echo "    Logs: ~/.clawd/logs/daemon.log"
+echo "    State: ~/.clawd/state.json"

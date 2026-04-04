@@ -7,10 +7,16 @@ function formatDate(date: Date): string {
 }
 
 function formatTime(date: Date): string {
-  return date.toTimeString().split(" ")[0]!;
+  return date.toLocaleTimeString("en-US", {
+    timeZone: "America/Los_Angeles",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
 }
 
 export async function appendDailyLog(
+  channelName: string,
   userMessage: string,
   assistantResponse: string,
 ): Promise<void> {
@@ -24,6 +30,16 @@ export async function appendDailyLog(
 
   await mkdir(dirname(dailyPath), { recursive: true });
 
-  const entry = `\n### ${formatTime(now)}\n**User:** ${userMessage}\n**Assistant:** ${assistantResponse}\n`;
+  const entry = `\n## ${formatTime(now)} [${channelName}]\n**${channelName}:** ${userMessage}\n**Youngsu:** ${assistantResponse}\n`;
   await appendFile(dailyPath, entry, "utf-8");
+}
+
+export async function appendSystemLog(event: string): Promise<void> {
+  const now = new Date();
+  const logPath = join(config.workspace, "memory", "system-log.md");
+
+  await mkdir(dirname(logPath), { recursive: true });
+
+  const entry = `\n[${now.toISOString()}] ${event}\n`;
+  await appendFile(logPath, entry, "utf-8");
 }

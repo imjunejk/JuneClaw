@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+SESSION="juneclaw"
+LOG_FILE="$HOME/.clawd/logs/daemon.log"
+STATE_FILE="$HOME/.clawd/state.json"
+
+# Create log dir if needed
+mkdir -p "$HOME/.clawd/logs"
+touch "$LOG_FILE"
+
+# Kill existing session if any
+if tmux has-session -t "$SESSION" 2>/dev/null; then
+  echo "Session '$SESSION' already exists. Attaching..."
+  exec tmux attach-session -t "$SESSION"
+fi
+
+# Create new session with gateway window
+tmux new-session -d -s "$SESSION" -n gateway
+
+# Create additional windows
+tmux new-window -t "$SESSION:1" -n logs
+tmux new-window -t "$SESSION:2" -n monitor
+
+# Start commands in each window
+tmux send-keys -t "$SESSION:gateway" "cd $PROJECT_DIR && node dist/index.js 2>&1 | tee -a $LOG_FILE" Enter
+tmux send-keys -t "$SESSION:logs" "tail -f $LOG_FILE" Enter
+tmux send-keys -t "$SESSION:monitor" "watch -n5 'cat $STATE_FILE 2>/dev/null | jq . 2>/dev/null || echo \"no state yet\"'" Enter
+
+# Focus gateway window
+tmux select-window -t "$SESSION:gateway"
+
+echo "JuneClaw tmux session '$SESSION' created."
+echo "  Attach with: tmux attach -t $SESSION"
+
+# Attach if interactive
+if [ -t 0 ]; then
+  exec tmux attach-session -t "$SESSION"
+fi

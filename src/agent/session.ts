@@ -3,12 +3,12 @@ import { dirname } from "node:path";
 import { config } from "../config.js";
 
 interface SessionStore {
-  [phone: string]: string; // phone → session ID
+  [phone: string]: string;
 }
 
 async function loadStore(): Promise<SessionStore> {
   try {
-    const data = await readFile(config.sessionStorePath, "utf-8");
+    const data = await readFile(config.paths.sessions, "utf-8");
     return JSON.parse(data) as SessionStore;
   } catch {
     return {};
@@ -16,8 +16,12 @@ async function loadStore(): Promise<SessionStore> {
 }
 
 async function saveStore(store: SessionStore): Promise<void> {
-  await mkdir(dirname(config.sessionStorePath), { recursive: true });
-  await writeFile(config.sessionStorePath, JSON.stringify(store), "utf-8");
+  await mkdir(dirname(config.paths.sessions), { recursive: true });
+  await writeFile(
+    config.paths.sessions,
+    JSON.stringify(store, null, 2),
+    "utf-8",
+  );
 }
 
 export async function getSessionId(
@@ -33,5 +37,11 @@ export async function setSessionId(
 ): Promise<void> {
   const store = await loadStore();
   store[phone] = sessionId;
+  await saveStore(store);
+}
+
+export async function clearSessionId(phone: string): Promise<void> {
+  const store = await loadStore();
+  delete store[phone];
   await saveStore(store);
 }

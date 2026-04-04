@@ -7,12 +7,6 @@ import type { IncomingMessage, Channel } from "./types.js";
 
 const execFileAsync = promisify(execFile);
 
-interface ImsgChat {
-  id: number;
-  identifier: string;
-  service: string;
-}
-
 interface ImsgMessage {
   id: number;
   guid: string;
@@ -23,51 +17,33 @@ interface ImsgMessage {
   created_at: string;
 }
 
-async function resolveChatId(phone: string): Promise<number> {
-  const { stdout } = await execFileAsync("imsg", ["chats", "--json"]);
-  const chats: ImsgChat[] = stdout
-    .trim()
-    .split("\n")
-    .filter(Boolean)
-    .map((line: string) => JSON.parse(line));
+type LastSeenStore = Record<string, number>; // chatId → lastSeenRowId
 
-  const match = chats.find((c) => c.identifier === phone);
-  if (!match) {
-    throw new Error(`No iMessage chat found for ${phone}`);
-  }
-  return match.id;
-}
-
-async function loadLastSeenId(): Promise<number> {
+async function loadLastSeenStore(): Promise<LastSeenStore> {
   try {
-    const data = await readFile(config.lastSeenPath, "utf-8");
-    const parsed = JSON.parse(data) as { lastSeenId: number };
-    return parsed.lastSeenId;
+    const data = await readFile(config.paths.lastSeen, "utf-8");
+    return JSON.parse(data) as LastSeenStore;
   } catch {
-    return 0;
+    return {};
   }
 }
 
-async function saveLastSeenId(id: number): Promise<void> {
-  await mkdir(dirname(config.lastSeenPath), { recursive: true });
-  await writeFile(
-    config.lastSeenPath,
-    JSON.stringify({ lastSeenId: id }),
-    "utf-8",
-  );
+async function saveLastSeenStore(store: LastSeenStore): Promise<void> {
+  await mkdir(dirname(config.paths.lastSeen), { recursive: true });
+  await writeFile(config.paths.lastSeen, JSON.stringify(store, null, 2), "utf-8");
 }
 
-export function createIMessageChannel(phone: string): Channel {
-  let chatId: number | null = null;
+export function createIMessageChannel(
+  phone: string,
+  chatId: number,
+): Channel {
   let lastSeenId: number | null = null;
 
   return {
     async pollNewMessages(): Promise<IncomingMessage[]> {
-      if (chatId === null) {
-        chatId = await resolveChatId(phone);
-      }
       if (lastSeenId === null) {
-        lastSeenId = await loadLastSeenId();
+        const store = await loadLastSeenStore();
+        lastSeenId = store[String(chatId)] ?? 0;
       }
 
       const { stdout } = await execFileAsync("imsg", [
@@ -85,7 +61,6 @@ export function createIMessageChannel(phone: string): Channel {
         .filter(Boolean)
         .map((line: string) => JSON.parse(line));
 
-      // Filter to only new messages from the other person (not from me)
       const newMessages = messages
         .filter((m) => m.id > lastSeenId! && !m.is_from_me && m.text)
         .sort((a, b) => a.id - b.id);
@@ -93,7 +68,9 @@ export function createIMessageChannel(phone: string): Channel {
       if (newMessages.length > 0) {
         const maxId = Math.max(...newMessages.map((m) => m.id));
         lastSeenId = maxId;
-        await saveLastSeenId(maxId);
+        const store = await loadLastSeenStore();
+        store[String(chatId)] = maxId;
+        await saveLastSeenStore(store);
       }
 
       return newMessages.map((m) => ({
@@ -108,7 +85,6 @@ export function createIMessageChannel(phone: string): Channel {
     },
 
     async sendMessage(text: string): Promise<void> {
-      // Split long messages (iMessage has practical limits)
       const maxLen = 4000;
       const chunks: string[] = [];
       for (let i = 0; i < text.length; i += maxLen) {
@@ -116,13 +92,7 @@ export function createIMessageChannel(phone: string): Channel {
       }
 
       for (const chunk of chunks) {
-        await execFileAsync("imsg", [
-          "send",
-          "--to",
-          phone,
-          "--text",
-          chunk,
-        ]);
+        await execFileAsync("imsg", ["send", "--to", phone, "--text", chunk]);
       }
     },
   };
