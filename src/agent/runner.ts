@@ -39,6 +39,7 @@ export interface UsageInfo {
   cacheReadTokens: number;
   cacheCreationTokens: number;
   totalTokens: number;
+  contextTokens: number;
   contextWindow: number;
   usagePercent: number;
   costUSD: number;
@@ -137,34 +138,38 @@ export async function runClaude(opts: {
     let usage: UsageInfo | undefined;
     const modelEntry = Object.values(parsed.modelUsage ?? {})[0];
     if (modelEntry) {
-      const totalTokens =
+      // Context usage = input tokens only (output tokens don't consume context window)
+      const contextTokens =
         modelEntry.inputTokens +
-        modelEntry.outputTokens +
         modelEntry.cacheReadInputTokens +
         modelEntry.cacheCreationInputTokens;
+      const totalTokens = contextTokens + modelEntry.outputTokens;
       usage = {
         inputTokens: modelEntry.inputTokens,
         outputTokens: modelEntry.outputTokens,
         cacheReadTokens: modelEntry.cacheReadInputTokens,
         cacheCreationTokens: modelEntry.cacheCreationInputTokens,
         totalTokens,
+        contextTokens,
         contextWindow: modelEntry.contextWindow,
         usagePercent: modelEntry.contextWindow > 0
-          ? (totalTokens / modelEntry.contextWindow) * 100
+          ? (contextTokens / modelEntry.contextWindow) * 100
           : 0,
         costUSD: parsed.total_cost_usd ?? modelEntry.costUSD,
         numTurns: parsed.num_turns ?? 1,
       };
     } else if (parsed.usage) {
       const u = parsed.usage;
-      const totalTokens =
-        u.input_tokens + u.output_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens;
+      const contextTokens =
+        u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens;
+      const totalTokens = contextTokens + u.output_tokens;
       usage = {
         inputTokens: u.input_tokens,
         outputTokens: u.output_tokens,
         cacheReadTokens: u.cache_read_input_tokens,
         cacheCreationTokens: u.cache_creation_input_tokens,
         totalTokens,
+        contextTokens,
         contextWindow: 0,
         usagePercent: 0,
         costUSD: parsed.total_cost_usd ?? 0,

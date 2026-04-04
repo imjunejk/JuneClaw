@@ -19,6 +19,7 @@ interface ChannelRotationState {
   lastUsage: UsageInfo | null;
   peakUsagePercent: number;
   cumulativeTokens: number;
+  warningSent: boolean;
 }
 
 const states = new Map<string, ChannelRotationState>();
@@ -34,6 +35,7 @@ function getState(phone: string): ChannelRotationState {
       lastUsage: null,
       peakUsagePercent: 0,
       cumulativeTokens: 0,
+      warningSent: false,
     };
     states.set(phone, s);
   }
@@ -116,12 +118,14 @@ export function shouldRotate(phone: string): RotationReason | null {
 
 export function shouldWarnContext(phone: string): boolean {
   const s = getState(phone);
-  const { tokenWarningPercent } = config.contextRotation;
-  return (
+  if (s.warningSent) return false;
+  const { tokenWarningPercent, tokenForceRotatePercent } = config.contextRotation;
+  const shouldWarn =
     s.lastUsage !== null &&
     s.lastUsage.usagePercent >= tokenWarningPercent &&
-    s.lastUsage.usagePercent < config.contextRotation.tokenForceRotatePercent
-  );
+    s.lastUsage.usagePercent < tokenForceRotatePercent;
+  if (shouldWarn) s.warningSent = true;
+  return shouldWarn;
 }
 
 export function getMessageCount(phone: string): number {
@@ -162,5 +166,6 @@ export async function executeRotation(
   s.lastUsage = null;
   s.peakUsagePercent = 0;
   s.cumulativeTokens = 0;
+  s.warningSent = false;
   s.lastRotatedAt = new Date().toISOString();
 }

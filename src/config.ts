@@ -10,7 +10,7 @@ export const config = {
       phone: process.env.JUNECLAW_JUNE_PHONE ?? "+12139992143",
       chatId: 1,
       name: "June",
-      quietHours: { start: 0, end: 0 }, // disabled temporarily
+      quietHours: { start: 23, end: 6 },
     },
   },
   claude: {
