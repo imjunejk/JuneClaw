@@ -1,4 +1,7 @@
 import { spawn } from "node:child_process";
+import { writeFile, unlink, mkdir } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { config } from "../config.js";
 
 interface ClaudeJsonOutput {
@@ -62,14 +65,20 @@ export async function runClaude(opts: {
   systemPrompt: string;
   sessionId?: string;
 }): Promise<RunResult> {
+  // Write system prompt to temp file to avoid arg length / null byte issues
+  const promptDir = join(tmpdir(), "juneclaw");
+  await mkdir(promptDir, { recursive: true });
+  const promptFile = join(promptDir, `sysprompt-${Date.now()}.md`);
+  await writeFile(promptFile, opts.systemPrompt, "utf-8");
+
   const args = [
     "--print",
     "--permission-mode",
     config.claude.permissionMode,
     "--output-format",
     "json",
-    "--system-prompt",
-    opts.systemPrompt,
+    "--append-system-prompt-file",
+    promptFile,
     "--allowedTools",
     config.claude.allowedTools.join(" "),
   ];
@@ -103,5 +112,8 @@ export async function runClaude(opts: {
       return await attempt();
     }
     throw err;
+  } finally {
+    // Clean up temp file
+    unlink(promptFile).catch(() => {});
   }
 }

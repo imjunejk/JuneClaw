@@ -150,7 +150,7 @@ async function runHeartbeat(
     await saveState();
 
     const response = result.response.trim();
-    if (response !== "HEARTBEAT_OK") {
+    if (!response.startsWith("HEARTBEAT_OK")) {
       log(`[heartbeat] action taken: ${response.slice(0, 100)}`);
       await channel.sendMessage(response);
     } else {
