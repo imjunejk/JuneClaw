@@ -49,7 +49,13 @@ export async function cleanupStaleAgents(): Promise<string> {
   if (!orphans || orphans.includes("[error]") || orphans.trim() === "") {
     return "no orphans";
   }
-  return cascadeKill("orphan-cleanup");
+  // Kill each orphan by its own ID
+  const ids = orphans.split("\n").map((l) => l.trim()).filter(Boolean);
+  const results: string[] = [];
+  for (const id of ids) {
+    results.push(await runTool(lifecycleScript, ["cascade-kill", id]));
+  }
+  return `killed ${ids.length} orphans: ${results.join("; ")}`;
 }
 
 export async function sendMailbox(

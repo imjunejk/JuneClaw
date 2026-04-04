@@ -1,4 +1,4 @@
-import { readFile, readdir, unlink, mkdir } from "node:fs/promises";
+import { readFile, readdir, writeFile, appendFile, unlink, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { config } from "../config.js";
 import { runClaude } from "../agent/runner.js";
@@ -63,8 +63,7 @@ Keep it concise — focus on actionable patterns, not conversation summaries.`;
 
   await mkdir(lessonsDir, { recursive: true });
   const lessonsPath = join(lessonsDir, `${today}-lessons.md`);
-  const { writeFile: wf } = await import("node:fs/promises");
-  await wf(lessonsPath, lessonsResult.response, "utf-8");
+  await writeFile(lessonsPath, lessonsResult.response, "utf-8");
 
   // Update master-rules
   const masterRulesPath = join(lessonsDir, "master-rules.md");
@@ -85,7 +84,6 @@ If any new preventative rules should be added:
     !rulesResult.response.includes("NO_NEW_RULES") &&
     rulesResult.response.trim().length > 0
   ) {
-    const { appendFile } = await import("node:fs/promises");
     await appendFile(masterRulesPath, `\n${rulesResult.response.trim()}\n`, "utf-8");
   }
 
@@ -150,8 +148,7 @@ Be concise. Preserve important decisions and context. Drop routine conversation.
       systemPrompt: compressionPrompt,
     });
 
-    const { writeFile: wf } = await import("node:fs/promises");
-    await wf(weeklyPath, result.response, "utf-8");
+    await writeFile(weeklyPath, result.response, "utf-8");
 
     // Delete compressed daily files
     for (const f of weekFiles) {
@@ -176,18 +173,21 @@ export async function runMonthlyCompression(): Promise<void> {
 
   if (files.length < 4) return;
 
-  // Group by month (from week string YYYY-W##)
+  // Group by month using the Thursday of each ISO week
   const months = new Map<string, string[]>();
   for (const f of files) {
     const weekStr = f.replace(".md", "");
-    // Approximate month from ISO week: use the Thursday of that week
     const match = weekStr.match(/^(\d{4})-W(\d{2})$/);
     if (!match) continue;
     const year = parseInt(match[1]!);
-    const week = parseInt(match[2]!);
-    const jan4 = new Date(year, 0, 4);
-    const thursday = new Date(jan4.getTime() + (week - 1) * 7 * 86_400_000);
-    const month = `${year}-${String(thursday.getMonth() + 1).padStart(2, "0")}`;
+    const weekNum = parseInt(match[2]!);
+    // Find Thursday of ISO week: Jan 4 is always in week 1,
+    // find its Monday, then add (weekNum - 1) weeks + 3 days (Thursday)
+    const jan4 = new Date(Date.UTC(year, 0, 4));
+    const dayOfWeek = jan4.getUTCDay() || 7; // Mon=1..Sun=7
+    const week1Monday = new Date(jan4.getTime() - (dayOfWeek - 1) * 86_400_000);
+    const thursday = new Date(week1Monday.getTime() + ((weekNum - 1) * 7 + 3) * 86_400_000);
+    const month = `${thursday.getUTCFullYear()}-${String(thursday.getUTCMonth() + 1).padStart(2, "0")}`;
     const arr = months.get(month) ?? [];
     arr.push(f);
     months.set(month, arr);
@@ -228,8 +228,12 @@ Be high-level. This is long-term memory — preserve only what matters months fr
       systemPrompt: compressionPrompt,
     });
 
-    const { writeFile: wf } = await import("node:fs/promises");
-    await wf(monthlyPath, result.response, "utf-8");
+    await writeFile(monthlyPath, result.response, "utf-8");
+
+    // Delete compressed weekly files
+    for (const f of monthFiles) {
+      await unlink(join(weeklyDir, f)).catch(() => {});
+    }
 
     await appendSystemLog(
       `Monthly compression: ${month} (${monthFiles.length} weekly files → ${monthlyPath})`,

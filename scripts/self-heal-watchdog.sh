@@ -119,6 +119,12 @@ is_silent() {
     return 1
   fi
 
+  # Validate IMSG_TARGET is a phone number before using in SQL
+  if [[ ! "$IMSG_TARGET" =~ ^\+[0-9]+$ ]]; then
+    log "Invalid IMSG_TARGET format: $IMSG_TARGET"
+    return 1
+  fi
+
   local last_msg_apple
   last_msg_apple=$(sqlite3 "$HOME/Library/Messages/chat.db" \
     "SELECT MAX(m.date) FROM message m

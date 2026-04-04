@@ -1,4 +1,4 @@
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { config } from "../config.js";
 import { getSessionId, clearSessionId } from "../agent/session.js";
 import { buildSystemPrompt } from "../memory/loader.js";

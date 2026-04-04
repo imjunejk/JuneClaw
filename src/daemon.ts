@@ -145,25 +145,24 @@ async function processMessage(
     return;
   }
 
-  // Track message count for context rotation
   recordMessage(phone);
 
-  // Warn at threshold
   const msgCount = getMessageCount(phone);
   const { messageCountWarning } = config.contextRotation;
   if (msgCount === messageCountWarning) {
     log(`[context] warning: ${msgCount} messages in session for ${phone}`);
   }
 
-  // Check rotation before processing
+  // Check for non-message-count rotation triggers (errors/task failures)
+  // before processing — these indicate the session is broken
   const preReason = shouldRotate(phone);
-  if (preReason) {
-    log(`[context-rotation] triggered: ${preReason}`);
+  if (preReason && preReason !== "message_count") {
+    log(`[context-rotation] triggered before processing: ${preReason}`);
     await executeRotation(phone, preReason);
     await channel.sendMessage(
-      `Context rotation triggered (${preReason}). Next message starts a fresh session.`,
+      `Context rotation triggered (${preReason}). Reprocessing your message in a fresh session.`,
     );
-    return;
+    // Fall through to process the message with the new (empty) session
   }
 
   const systemPrompt = await buildSystemPrompt("imessage", name);
@@ -189,10 +188,19 @@ async function processMessage(
     log(`[response] ${result.response.slice(0, 80)}...`);
     await channel.sendMessage(result.response);
     await appendDailyLog(name, text, result.response);
+
+    // Check message-count rotation after processing — message was delivered
+    const postReason = shouldRotate(phone);
+    if (postReason === "message_count") {
+      log(`[context-rotation] triggered after processing: ${postReason}`);
+      await executeRotation(phone, postReason);
+      await channel.sendMessage(
+        `Context rotation triggered (session message limit). Next message starts a fresh session.`,
+      );
+    }
   } catch (err) {
     recordError(phone);
 
-    // Detect context-full errors
     if (
       err instanceof Error &&
       (err.message.includes("context") || err.message.includes("too long"))
