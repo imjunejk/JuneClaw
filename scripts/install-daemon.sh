@@ -38,6 +38,18 @@ fi
 launchctl bootstrap "gui/$(id -u)" "$PLIST_DEST"
 echo "  Bootstrapped $PLIST_NAME"
 
+# 6. Install watchdog cron (every 5 min)
+WATCHDOG="$PROJECT_DIR/scripts/self-heal-watchdog.sh"
+chmod +x "$WATCHDOG"
+CRON_ENTRY="*/5 * * * * $WATCHDOG"
+if ! crontab -l 2>/dev/null | grep -qF "$WATCHDOG"; then
+  (crontab -l 2>/dev/null; echo "$CRON_ENTRY") | crontab -
+  echo "  Installed watchdog cron: $CRON_ENTRY"
+else
+  echo "  Watchdog cron already installed"
+fi
+
 echo "==> JuneClaw daemon installed and running"
 echo "    Logs: ~/.clawd/logs/daemon.log"
 echo "    State: ~/.clawd/state.json"
+echo "    Watchdog: crontab */5 * * * *"

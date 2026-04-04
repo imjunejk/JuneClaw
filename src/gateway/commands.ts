@@ -2,9 +2,9 @@ import { readFile, writeFile } from "node:fs/promises";
 import { config } from "../config.js";
 import { getSessionId, clearSessionId } from "../agent/session.js";
 import { buildSystemPrompt } from "../memory/loader.js";
-import { broadcast, listReportTypes, listRecipients } from "./broadcast.js";
 import { listJobs } from "../scheduler/cron.js";
-import { runAlgoScript, listScripts } from "../algo/runner.js";
+import { listAgentStatus, cascadeKill } from "../agent/subagents.js";
+import { writeHandoff } from "../memory/handoff.js";
 
 export interface CommandResult {
   handled: boolean;
@@ -42,14 +42,11 @@ export async function handleCommand(
     case "/quiet":
       return { handled: true, response: `quiet toggle received (phone: ${phone})` };
 
-    case "/broadcast":
-      return { handled: true, response: await broadcastCommand(args) };
-
     case "/cron":
       return { handled: true, response: await cronCommand(args) };
 
-    case "/algo":
-      return { handled: true, response: await algoCommand(args) };
+    case "/agents":
+      return { handled: true, response: await agentsCommand(args) };
 
     default:
       return { handled: false };
@@ -79,10 +76,11 @@ async function statusCommand(phone: string): Promise<string> {
 async function resetCommand(phone: string): Promise<string> {
   const sessionId = await getSessionId(phone);
   if (sessionId) {
-    // Write HANDOFF.md so next session picks up context
-    const handoff = `# Handoff\n\nPrevious session ${sessionId} was reset at ${new Date().toISOString()}.\nReview recent daily logs for context.\n`;
-    const { join } = await import("node:path");
-    await writeFile(join(config.workspace, "HANDOFF.md"), handoff, "utf-8");
+    await writeHandoff({
+      reason: "manual reset via /reset command",
+      progress: `Session ${sessionId} reset by user.`,
+      nextAction: "Review recent daily logs for context.",
+    });
     await clearSessionId(phone);
     return `Session cleared. HANDOFF.md written. Next message starts fresh.`;
   }
@@ -96,41 +94,7 @@ async function memoryCommand(): Promise<string> {
   return `System prompt: ${charCount} chars, ${lineCount} lines`;
 }
 
-async function broadcastCommand(args: string[]): Promise<string> {
-  // /broadcast <reportType> <message>
-  // /broadcast list — show report types
-  // /broadcast recipients [type] — show recipients
-  if (args.length === 0 || args[0] === "help") {
-    return "Usage: /broadcast <type> <message>\n/broadcast list\n/broadcast recipients [type]";
-  }
-
-  if (args[0] === "list") {
-    const types = await listReportTypes();
-    const lines = Object.entries(types).map(([k, v]) => `  ${k}: ${v}`);
-    return `Report types:\n${lines.join("\n")}`;
-  }
-
-  if (args[0] === "recipients") {
-    const recipients = await listRecipients(args[1]);
-    const lines = recipients.map(
-      (r) => `  ${r.name} (${r.target}) — ${r.reports.join(", ")}`,
-    );
-    return `Recipients:\n${lines.join("\n")}`;
-  }
-
-  const reportType = args[0]!;
-  const message = args.slice(1).join(" ");
-  if (!message) {
-    return "Missing message. Usage: /broadcast <type> <message>";
-  }
-
-  const sent = await broadcast(reportType, message);
-  return `Broadcast sent to ${sent.length}: ${sent.join(", ")}`;
-}
-
 async function cronCommand(args: string[]): Promise<string> {
-  // /cron — list jobs
-  // /cron list — list jobs
   if (args.length === 0 || args[0] === "list") {
     const jobs = listJobs();
     if (jobs.length === 0) return "No cron jobs registered.";
@@ -143,24 +107,16 @@ async function cronCommand(args: string[]): Promise<string> {
   return "Usage: /cron [list]";
 }
 
-async function algoCommand(args: string[]): Promise<string> {
-  // /algo <script> — run a script
-  // /algo list — list available scripts
-  if (args.length === 0 || args[0] === "help") {
-    return `Usage: /algo <script>\n/algo list\nAvailable: ${listScripts().join(", ")}`;
+async function agentsCommand(args: string[]): Promise<string> {
+  if (args.length === 0 || args[0] === "list" || args[0] === "status") {
+    const status = await listAgentStatus();
+    return status || "No active sub-agents.";
   }
 
-  if (args[0] === "list") {
-    return `Available algo scripts: ${listScripts().join(", ")}`;
+  if (args[0] === "kill" && args[1]) {
+    const result = await cascadeKill(args[1]);
+    return result || `Cascade kill sent for: ${args[1]}`;
   }
 
-  const name = args[0]!;
-  const result = await runAlgoScript(name);
-
-  if (result.error) {
-    return `Algo ${name} failed: ${result.error}`;
-  }
-
-  const output = result.output.slice(0, 3000);
-  return `Algo ${name} output:\n${output}`;
+  return "Usage: /agents [list|status|kill <id>]";
 }

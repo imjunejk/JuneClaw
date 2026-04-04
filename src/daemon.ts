@@ -7,9 +7,23 @@ import { runClaude } from "./agent/runner.js";
 import { getSessionId, setSessionId } from "./agent/session.js";
 import { buildSystemPrompt } from "./memory/loader.js";
 import { appendDailyLog, appendSystemLog } from "./memory/writer.js";
-import { broadcast } from "./gateway/broadcast.js";
 import { addJob, stopAll as stopAllCron } from "./scheduler/cron.js";
-import { runAlgoScript } from "./algo/runner.js";
+import { cascadeKill } from "./agent/subagents.js";
+import { writeHandoff } from "./memory/handoff.js";
+import {
+  recordError,
+  recordSuccess,
+  recordMessage,
+  recordContextFull,
+  shouldRotate,
+  executeRotation,
+  getMessageCount,
+} from "./agent/context-rotation.js";
+import {
+  runLessonsLoop,
+  runWeeklyCompression,
+  runMonthlyCompression,
+} from "./memory/consolidation.js";
 import type { Channel } from "./gateway/types.js";
 
 function log(msg: string): void {
@@ -38,11 +52,9 @@ const state: DaemonState = {
 
 const quietMode = new Map<string, boolean>();
 
-// BUG 1 fix: dedup set + processing lock to prevent duplicate replies
 const processedIds = new Set<number>();
 let processing = false;
 
-// BUG 3 fix: PID file singleton enforcement
 async function acquirePidLock(): Promise<void> {
   await mkdir(dirname(config.paths.pidFile), { recursive: true });
 
@@ -51,13 +63,12 @@ async function acquirePidLock(): Promise<void> {
     const pid = parseInt(existing.trim(), 10);
     if (!isNaN(pid)) {
       try {
-        process.kill(pid, 0); // check if process exists
+        process.kill(pid, 0);
         console.error(
           `Another daemon instance is already running (PID ${pid}). Exiting.`,
         );
         process.exit(1);
       } catch {
-        // Process doesn't exist — stale PID file, safe to overwrite
         log(`Removing stale PID file (PID ${pid} not running)`);
       }
     }
@@ -96,7 +107,6 @@ function isQuietHour(ch: ChannelConfig): boolean {
   );
   const { start, end } = ch.quietHours;
   if (start > end) {
-    // Wraps midnight: e.g. 23–6
     return hour >= start || hour < end;
   }
   return hour >= start && hour < end;
@@ -110,19 +120,16 @@ async function processMessage(
   const phone = channelConfig.phone;
   const name = channelConfig.name;
 
-  // Check quiet mode
   if (quietMode.get(phone)) {
     log(`[quiet] skipping message from ${name}`);
     return;
   }
 
-  // Check quiet hours
   if (isQuietHour(channelConfig)) {
     log(`[quiet-hours] skipping message from ${name}`);
     return;
   }
 
-  // Handle local commands
   const cmdResult = await handleCommand(text, phone);
   if (cmdResult.handled) {
     if (cmdResult.response) {
@@ -131,7 +138,6 @@ async function processMessage(
     return;
   }
 
-  // Handle /quiet toggle
   if (text.trim().toLowerCase() === "/quiet") {
     const current = quietMode.get(phone) ?? false;
     quietMode.set(phone, !current);
@@ -139,27 +145,63 @@ async function processMessage(
     return;
   }
 
-  // Build system prompt and run Claude
+  // Track message count for context rotation
+  recordMessage(phone);
+
+  // Warn at threshold
+  const msgCount = getMessageCount(phone);
+  const { messageCountWarning } = config.contextRotation;
+  if (msgCount === messageCountWarning) {
+    log(`[context] warning: ${msgCount} messages in session for ${phone}`);
+  }
+
+  // Check rotation before processing
+  const preReason = shouldRotate(phone);
+  if (preReason) {
+    log(`[context-rotation] triggered: ${preReason}`);
+    await executeRotation(phone, preReason);
+    await channel.sendMessage(
+      `Context rotation triggered (${preReason}). Next message starts a fresh session.`,
+    );
+    return;
+  }
+
   const systemPrompt = await buildSystemPrompt("imessage", name);
   const sessionId = await getSessionId(phone);
 
-  const result = await runClaude({
-    prompt: text,
-    systemPrompt,
-    sessionId,
-  });
+  try {
+    const result = await runClaude({
+      prompt: text,
+      systemPrompt,
+      sessionId,
+    });
 
-  if (result.sessionId) {
-    await setSessionId(phone, result.sessionId);
-    state.channels[phone] = {
-      sessionId: result.sessionId,
-      quiet: quietMode.get(phone) ?? false,
-    };
+    recordSuccess(phone);
+
+    if (result.sessionId) {
+      await setSessionId(phone, result.sessionId);
+      state.channels[phone] = {
+        sessionId: result.sessionId,
+        quiet: quietMode.get(phone) ?? false,
+      };
+    }
+
+    log(`[response] ${result.response.slice(0, 80)}...`);
+    await channel.sendMessage(result.response);
+    await appendDailyLog(name, text, result.response);
+  } catch (err) {
+    recordError(phone);
+
+    // Detect context-full errors
+    if (
+      err instanceof Error &&
+      (err.message.includes("context") || err.message.includes("too long"))
+    ) {
+      recordContextFull(phone);
+    }
+
+    throw err;
   }
-
-  log(`[response] ${result.response.slice(0, 80)}...`);
-  await channel.sendMessage(result.response);
-  await appendDailyLog(name, text, result.response);
 }
 
 async function runHeartbeat(
@@ -200,54 +242,47 @@ async function runHeartbeat(
   }
 }
 
-async function runAlgoAndBroadcast(scriptName: string, reportType: string): Promise<void> {
-  log(`[algo] running ${scriptName}...`);
-  try {
-    const result = await runAlgoScript(scriptName);
-    if (result.error) {
-      logError(`[algo] ${scriptName} failed`, result.error);
-      return;
-    }
-    if (!result.output) {
-      log(`[algo] ${scriptName} produced no output`);
-      return;
-    }
-    const sent = await broadcast(reportType, result.output);
-    log(`[algo] ${scriptName} → broadcast to ${sent.length}: ${sent.join(", ")}`);
-  } catch (err) {
-    logError(`[algo] ${scriptName} broadcast failed`, err);
-  }
-}
-
 function initCronScheduler(channel: Channel, channelConfig: ChannelConfig): void {
   log("[cron] initializing scheduler...");
 
-  // Heartbeat cron (replaces setInterval)
   addJob("heartbeat", config.cron.schedules.heartbeat!, () =>
     runHeartbeat(channel, channelConfig),
   );
 
-  // Algo cron jobs
-  const algoJobs: Array<{ name: string; script: string; reportType: string }> = [
-    { name: "reporter", script: "reporter", reportType: "unified" },
-    { name: "options_monitor", script: "options_monitor", reportType: "options" },
-    { name: "stock_scanner", script: "stock_scanner", reportType: "unified" },
-    { name: "pump_detector", script: "pump_detector", reportType: "pump" },
-  ];
-
-  for (const { name, script, reportType } of algoJobs) {
-    const schedule = config.cron.schedules[name];
-    if (schedule) {
-      addJob(name, schedule, () => runAlgoAndBroadcast(script, reportType));
-      log(`[cron] scheduled ${name}: ${schedule}`);
+  addJob("lessonsLoop", config.cron.schedules.lessonsLoop!, async () => {
+    log("[cron] running lessons loop...");
+    try {
+      await runLessonsLoop();
+      log("[cron] lessons loop completed");
+    } catch (err) {
+      logError("[cron] lessons loop failed", err);
     }
-  }
+  });
+
+  addJob("weeklyCompression", config.cron.schedules.weeklyCompression!, async () => {
+    log("[cron] running weekly compression...");
+    try {
+      await runWeeklyCompression();
+      log("[cron] weekly compression completed");
+    } catch (err) {
+      logError("[cron] weekly compression failed", err);
+    }
+  });
+
+  addJob("monthlyCompression", config.cron.schedules.monthlyCompression!, async () => {
+    log("[cron] running monthly compression...");
+    try {
+      await runMonthlyCompression();
+      log("[cron] monthly compression completed");
+    } catch (err) {
+      logError("[cron] monthly compression failed", err);
+    }
+  });
 
   log("[cron] scheduler initialized");
 }
 
 export async function startDaemon(): Promise<void> {
-  // BUG 3: Singleton enforcement — refuse to start if another instance is running
   await acquirePidLock();
 
   const ch = config.channels.june;
@@ -260,13 +295,18 @@ export async function startDaemon(): Promise<void> {
     `juneclaw daemon started — polling ${ch.name} (${ch.phone}) every ${config.poll.intervalMs}ms`,
   );
 
-  // Initialize cron scheduler (handles heartbeat + algo jobs)
   initCronScheduler(channel, ch);
 
-  // Graceful shutdown
   const shutdown = async (signal: string) => {
     log(`Received ${signal}, shutting down...`);
     stopAllCron();
+
+    // Write handoff for next session
+    await writeHandoff({ reason: `daemon shutdown (${signal})` }).catch(() => {});
+
+    // Cascade-kill any sub-agents
+    await cascadeKill("juneclaw-main").catch(() => {});
+
     await releasePidLock();
     await appendSystemLog(`Daemon shutdown (${signal})`);
     await saveState();
@@ -279,12 +319,10 @@ export async function startDaemon(): Promise<void> {
   // Main poll loop
   while (true) {
     try {
-      // Skip poll if already processing a message
       if (!processing) {
         const messages = await channel.pollNewMessages();
 
         for (const msg of messages) {
-          // BUG 1: Skip already-processed message IDs
           if (processedIds.has(msg.id)) continue;
           processedIds.add(msg.id);
 
@@ -305,7 +343,6 @@ export async function startDaemon(): Promise<void> {
       logError("Poll cycle error", err);
     }
 
-    // Prevent unbounded growth of the dedup set
     if (processedIds.size > 10_000) {
       const ids = Array.from(processedIds);
       for (const id of ids.slice(0, ids.length - 1_000)) {

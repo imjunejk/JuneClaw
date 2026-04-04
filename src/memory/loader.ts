@@ -1,4 +1,4 @@
-import { readFile, unlink } from "node:fs/promises";
+import { readFile, readdir, unlink } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { join } from "node:path";
@@ -74,7 +74,6 @@ async function fetchRecentMessages(): Promise<string | null> {
 
     if (messages.length === 0) return null;
 
-    // Sort oldest first for conversation flow
     messages.sort((a, b) => a.id - b.id);
 
     const lines = messages
@@ -94,7 +93,16 @@ async function fetchRecentMessages(): Promise<string | null> {
 
     return `<recent_conversation>\n${lines.join("\n")}\n</recent_conversation>`;
   } catch {
-    // Non-fatal: conversation history is supplementary
+    return null;
+  }
+}
+
+async function findMostRecent(dir: string): Promise<string | null> {
+  try {
+    const files = (await readdir(dir)).filter((f) => f.endsWith(".md")).sort();
+    if (files.length === 0) return null;
+    return loadFileOrNull(join(dir, files[files.length - 1]!));
+  } catch {
     return null;
   }
 }
@@ -113,6 +121,7 @@ export async function buildSystemPrompt(
     { label: "IDENTITY", path: join(ws, "IDENTITY.md"), maxChars: 3000 },
     { label: "USER", path: join(ws, "USER.md"), maxChars: 3000 },
     { label: "AGENTS", path: join(ws, "AGENTS.md"), maxChars: 5000 },
+    { label: "SUB_AGENTS", path: join(ws, "SUB_AGENTS.md"), maxChars: 10000 },
     {
       label: "MASTER RULES",
       path: join(ws, "memory", "lessons", "master-rules.md"),
@@ -139,10 +148,37 @@ export async function buildSystemPrompt(
       path: join(ws, "checklists", "YSU-CHECKLIST.md"),
       maxChars: 3000,
     },
+    {
+      label: "HEARTBEAT",
+      path: join(ws, "HEARTBEAT.md"),
+      maxChars: 3000,
+    },
+  ];
+
+  // Add strategy files for sub-agent orchestration
+  const strategyFiles: FileSpec[] = [
+    {
+      label: "STRATEGY: DEV-TEAM (Youngsu)",
+      path: join(config.subAgents.strategiesPath, "dev-team-youngsu.md"),
+      maxChars: 8000,
+    },
+    {
+      label: "STRATEGY: DEV-TEAM (Common)",
+      path: join(config.subAgents.strategiesPath, "dev-team-common.md"),
+      maxChars: 5000,
+    },
+    {
+      label: "STRATEGY: DEV-TEAM (Process)",
+      path: join(config.subAgents.strategiesPath, "dev-team-process.md"),
+      maxChars: 5000,
+    },
   ];
 
   const sections: string[] = [];
-  for (const { label, path, maxChars, deleteAfterLoad } of files) {
+  for (const { label, path, maxChars, deleteAfterLoad } of [
+    ...files,
+    ...strategyFiles,
+  ]) {
     const content = await loadFileOrNull(path);
     if (content) {
       sections.push(`## ${label}\n${truncate(content.trim(), maxChars)}`);
@@ -150,24 +186,48 @@ export async function buildSystemPrompt(
         try {
           await unlink(path);
         } catch {
-          // ignore if already deleted
+          // ignore
         }
       }
     }
   }
 
+  // Add most recent weekly/monthly summaries for long-term memory
+  const weeklyDir = join(ws, "memory", "weekly");
+  const monthlyDir = join(ws, "memory", "monthly");
+
+  const recentWeekly = await findMostRecent(weeklyDir);
+  if (recentWeekly) {
+    sections.push(
+      `## WEEKLY SUMMARY (latest)\n${truncate(recentWeekly.trim(), 4000)}`,
+    );
+  }
+
+  const recentMonthly = await findMostRecent(monthlyDir);
+  if (recentMonthly) {
+    sections.push(
+      `## MONTHLY SUMMARY (latest)\n${truncate(recentMonthly.trim(), 3000)}`,
+    );
+  }
+
   const workspaceContext = `<workspace_context>\n${sections.join("\n\n")}\n</workspace_context>`;
 
-  // Fetch recent conversation history
   const conversationHistory = await fetchRecentMessages();
 
   const phone = config.channels.june.phone;
+  const toolsPath = config.subAgents.toolsPath;
   const runtimeContext = `<runtime_context>
 Time: ${formatTimePT(today)}
 Channel: iMessage from ${senderName} (${phone})
 You are Youngsu. Respond in the style defined in SOUL.md.
 You have Bash tool — use it to call: imsg, gh, memo, remindctl, things, weather via wttr.in
-For background tasks: use Agent tool to spawn sub-agents
+
+Sub-agent delegation (use Agent tool):
+- Read strategies/dev-team-{name}.md for each sub-agent's role-specific prompt before delegating
+- Agent lifecycle: Bash("${toolsPath}/agent-lifecycle.sh register|complete|cascade-kill|status|orphans")
+- Agent mailbox: Bash("${toolsPath}/mailbox.sh send|read|peek|broadcast|list")
+- Max concurrent sub-agents: ${config.subAgents.maxConcurrent}
+
 Send iMessage: Bash("imsg send --to ${phone} --text \\"...\\"")
 </runtime_context>`;
 
