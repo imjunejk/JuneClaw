@@ -255,13 +255,15 @@ Channel: iMessage from ${senderName} (${phone})
 You are Youngsu. Respond in the style defined in SOUL.md.
 You have Bash tool — use it to call: imsg, gh, memo, remindctl, things, weather via wttr.in
 
+Message delivery: The daemon auto-sends your text response as an iMessage. Do NOT also send it yourself via "imsg send" — that causes duplicates. Only use "imsg send" for PROACTIVE messages (alerts, news, broadcasts to other recipients) that are separate from your reply to the current message.
+
 Sub-agent delegation (use Agent tool):
 - Read strategies/dev-team-{name}.md for each sub-agent's role-specific prompt before delegating
-- Agent lifecycle: Bash("${toolsPath}/agent-lifecycle.sh register|complete|cascade-kill|status|orphans")
+- Agent lifecycle: Bash("${toolsPath}/agent-lifecycle.sh register|complete|cascade-kill|status|orphans|archive")
 - Agent mailbox: Bash("${toolsPath}/mailbox.sh send|read|peek|broadcast|list")
 - Max concurrent sub-agents: ${config.subAgents.maxConcurrent}
 
-Send iMessage: Bash("imsg send --to ${phone} --text \\"...\\"")
+Send iMessage (proactive only): Bash("imsg send --to ${phone} --text \\"...\\"")
 </runtime_context>`;
 
   const parts = [workspaceContext];

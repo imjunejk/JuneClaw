@@ -58,6 +58,10 @@ export async function cleanupStaleAgents(): Promise<string> {
   return `killed ${ids.length} orphans: ${results.join("; ")}`;
 }
 
+export async function archiveCompleted(): Promise<string> {
+  return runTool(lifecycleScript, ["archive"]);
+}
+
 export async function sendMailbox(
   to: string,
   message: string,

@@ -8,7 +8,7 @@ import { getSessionId, setSessionId } from "./agent/session.js";
 import { buildSystemPrompt } from "./memory/loader.js";
 import { appendDailyLog, appendSystemLog } from "./memory/writer.js";
 import { addJob, stopAll as stopAllCron } from "./scheduler/cron.js";
-import { cascadeKill, cleanupStaleAgents } from "./agent/subagents.js";
+import { cascadeKill, cleanupStaleAgents, archiveCompleted } from "./agent/subagents.js";
 import { writeHandoff } from "./memory/handoff.js";
 import { emit } from "./hooks/events.js";
 import { logFromError } from "./hooks/incident.js";
@@ -17,7 +17,9 @@ import {
   recordSuccess,
   recordMessage,
   recordContextFull,
+  recordUsage,
   shouldRotate,
+  shouldWarnContext,
   executeRotation,
   getMessageCount,
 } from "./agent/context-rotation.js";
@@ -181,6 +183,11 @@ async function processMessage(
 
     recordSuccess(phone);
 
+    if (result.usage) {
+      recordUsage(phone, result.usage);
+      log(`[usage] ${result.usage.totalTokens.toLocaleString()} tokens (${result.usage.usagePercent.toFixed(1)}% of ${result.usage.contextWindow.toLocaleString()}), $${result.usage.costUSD.toFixed(4)}`);
+    }
+
     if (result.sessionId) {
       await setSessionId(phone, result.sessionId);
       state.channels[phone] = {
@@ -194,14 +201,24 @@ async function processMessage(
     await appendDailyLog(name, text, result.response);
     await emit("message:responded", { to: name });
 
-    // Check message-count rotation after processing — message was delivered
+    // Check token-based and message-count rotation after processing
+    if (shouldWarnContext(phone) && result.usage) {
+      log(`[context] warning: ${result.usage.usagePercent.toFixed(1)}% context used`);
+      await channel.sendMessage(
+        `[Context ${result.usage.usagePercent.toFixed(0)}%] 세션이 곧 리셋됩니다.`,
+      );
+    }
+
     const postReason = shouldRotate(phone);
-    if (postReason === "message_count") {
+    if (postReason) {
       log(`[context-rotation] triggered after processing: ${postReason}`);
       await executeRotation(phone, postReason);
       await emit("rotation:triggered", { reason: postReason });
+      const label = postReason === "token_threshold"
+        ? `컨텍스트 ${result.usage?.usagePercent.toFixed(0) ?? "?"}% 도달`
+        : `세션 메시지 한도`;
       await channel.sendMessage(
-        `Context rotation triggered (session message limit). Next message starts a fresh session.`,
+        `Context rotation (${label}). 다음 메시지부터 새 세션으로 시작합니다.`,
       );
     }
   } catch (err) {
@@ -231,11 +248,15 @@ async function runHeartbeat(
   log("[heartbeat] running...");
 
   try {
-    // Orphan detection before heartbeat
+    // Orphan detection + archive before heartbeat
     const orphanResult = await cleanupStaleAgents();
     if (orphanResult !== "no orphans") {
       log(`[heartbeat] orphan cleanup: ${orphanResult}`);
       await emit("agent:orphan_detected", { result: orphanResult });
+    }
+    const archiveResult = await archiveCompleted();
+    if (archiveResult && !archiveResult.includes("Archived 0")) {
+      log(`[heartbeat] ${archiveResult}`);
     }
 
     const systemPrompt = await buildSystemPrompt("heartbeat", name);
