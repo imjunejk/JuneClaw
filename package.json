@@ -1,5 +1,5 @@
 {
-  "name": "clawd",
+  "name": "juneclaw",
   "version": "0.1.0",
   "description": "Personal AI assistant daemon — Claude CLI gateway over iMessage",
   "type": "module",

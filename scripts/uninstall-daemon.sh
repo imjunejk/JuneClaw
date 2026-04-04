@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PLIST_NAME="ai.clawd.daemon"
+PLIST_NAME="ai.juneclaw.daemon"
 PLIST_PATH="$HOME/Library/LaunchAgents/$PLIST_NAME.plist"
 
-echo "==> clawd daemon uninstaller"
+echo "==> JuneClaw daemon uninstaller"
 
 if [ -f "$PLIST_PATH" ]; then
   launchctl unload "$PLIST_PATH" 2>/dev/null || true

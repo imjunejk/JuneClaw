@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>ai.clawd.daemon</string>
+  <string>ai.juneclaw.daemon</string>
   <key>ProgramArguments</key>
   <array>
     <string>/usr/local/bin/node</string>
@@ -11,9 +11,9 @@
   </array>
   <key>EnvironmentVariables</key>
   <dict>
-    <key>CLAWD_WORKSPACE</key>
+    <key>JUNECLAW_WORKSPACE</key>
     <string>HOME_PATH/openclaw</string>
-    <key>CLAWD_IMESSAGE_PHONE</key>
+    <key>JUNECLAW_IMESSAGE_PHONE</key>
     <string>+12139992143</string>
     <key>PATH</key>
     <string>/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin:HOME_PATH/.local/bin</string>
@@ -23,8 +23,8 @@
   <key>KeepAlive</key>
   <true/>
   <key>StandardOutPath</key>
-  <string>HOME_PATH/.clawd/logs/daemon.log</string>
+  <string>HOME_PATH/.juneclaw/logs/daemon.log</string>
   <key>StandardErrorPath</key>
-  <string>HOME_PATH/.clawd/logs/daemon.err</string>
+  <string>HOME_PATH/.juneclaw/logs/daemon.err</string>
 </dict>
 </plist>
