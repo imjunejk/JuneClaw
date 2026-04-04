@@ -123,6 +123,21 @@ export async function buildSystemPrompt(
     { label: "AGENTS", path: join(ws, "AGENTS.md"), maxChars: 5000 },
     { label: "SUB_AGENTS", path: join(ws, "SUB_AGENTS.md"), maxChars: 10000 },
     {
+      label: "OPERATING PRINCIPLES",
+      path: join(ws, "docs", "operating-principles.md"),
+      maxChars: 5000,
+    },
+    {
+      label: "SESSION MANAGEMENT",
+      path: join(ws, "docs", "session-management.md"),
+      maxChars: 4000,
+    },
+    {
+      label: "COMMUNICATION RULES",
+      path: join(ws, "docs", "communication-rules.md"),
+      maxChars: 5000,
+    },
+    {
       label: "MASTER RULES",
       path: join(ws, "memory", "lessons", "master-rules.md"),
       maxChars: 10000,
@@ -192,6 +207,24 @@ export async function buildSystemPrompt(
     }
   }
 
+  // Load skill definitions from .openclaw/skills/
+  const skillsDir = join(ws, ".openclaw", "skills");
+  try {
+    const skillEntries = await readdir(skillsDir, { withFileTypes: true });
+    for (const entry of skillEntries) {
+      if (!entry.isDirectory()) continue;
+      const skillPath = join(skillsDir, entry.name, "SKILL.md");
+      const content = await loadFileOrNull(skillPath);
+      if (content) {
+        sections.push(
+          `## SKILL: ${entry.name}\n${truncate(content.trim(), 2000)}`,
+        );
+      }
+    }
+  } catch {
+    // No skills directory
+  }
+
   // Add most recent weekly/monthly summaries for long-term memory
   const weeklyDir = join(ws, "memory", "weekly");
   const monthlyDir = join(ws, "memory", "monthly");
@@ -236,5 +269,13 @@ Send iMessage: Bash("imsg send --to ${phone} --text \\"...\\"")
     parts.push(conversationHistory);
   }
   parts.push(runtimeContext);
-  return parts.join("\n\n");
+
+  const prompt = parts.join("\n\n");
+  const PROMPT_WARN_THRESHOLD = 80_000;
+  if (prompt.length > PROMPT_WARN_THRESHOLD) {
+    console.warn(
+      `[loader] system prompt is ${prompt.length} chars (threshold: ${PROMPT_WARN_THRESHOLD})`,
+    );
+  }
+  return prompt;
 }

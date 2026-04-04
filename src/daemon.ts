@@ -8,8 +8,10 @@ import { getSessionId, setSessionId } from "./agent/session.js";
 import { buildSystemPrompt } from "./memory/loader.js";
 import { appendDailyLog, appendSystemLog } from "./memory/writer.js";
 import { addJob, stopAll as stopAllCron } from "./scheduler/cron.js";
-import { cascadeKill } from "./agent/subagents.js";
+import { cascadeKill, cleanupStaleAgents } from "./agent/subagents.js";
 import { writeHandoff } from "./memory/handoff.js";
+import { emit } from "./hooks/events.js";
+import { logFromError } from "./hooks/incident.js";
 import {
   recordError,
   recordSuccess,
@@ -119,6 +121,7 @@ async function processMessage(
 ): Promise<void> {
   const phone = channelConfig.phone;
   const name = channelConfig.name;
+  await emit("message:received", { from: name });
 
   if (quietMode.get(phone)) {
     log(`[quiet] skipping message from ${name}`);
@@ -159,6 +162,7 @@ async function processMessage(
   if (preReason && preReason !== "message_count") {
     log(`[context-rotation] triggered before processing: ${preReason}`);
     await executeRotation(phone, preReason);
+    await emit("rotation:triggered", { reason: preReason });
     await channel.sendMessage(
       `Context rotation triggered (${preReason}). Reprocessing your message in a fresh session.`,
     );
@@ -188,18 +192,22 @@ async function processMessage(
     log(`[response] ${result.response.slice(0, 80)}...`);
     await channel.sendMessage(result.response);
     await appendDailyLog(name, text, result.response);
+    await emit("message:responded", { to: name });
 
     // Check message-count rotation after processing — message was delivered
     const postReason = shouldRotate(phone);
     if (postReason === "message_count") {
       log(`[context-rotation] triggered after processing: ${postReason}`);
       await executeRotation(phone, postReason);
+      await emit("rotation:triggered", { reason: postReason });
       await channel.sendMessage(
         `Context rotation triggered (session message limit). Next message starts a fresh session.`,
       );
     }
   } catch (err) {
     recordError(phone);
+    await emit("message:error", { error: String(err) }).catch(() => {});
+    await logFromError(err, `processMessage from ${name}`).catch(() => {});
 
     if (
       err instanceof Error &&
@@ -223,6 +231,13 @@ async function runHeartbeat(
   log("[heartbeat] running...");
 
   try {
+    // Orphan detection before heartbeat
+    const orphanResult = await cleanupStaleAgents();
+    if (orphanResult !== "no orphans") {
+      log(`[heartbeat] orphan cleanup: ${orphanResult}`);
+      await emit("agent:orphan_detected", { result: orphanResult });
+    }
+
     const systemPrompt = await buildSystemPrompt("heartbeat", name);
     const sessionId = await getSessionId(phone);
 
@@ -240,13 +255,16 @@ async function runHeartbeat(
     const response = result.response.trim();
     if (response.includes("HEARTBEAT_OK") || response.includes("NO_REPLY")) {
       log("[heartbeat] OK");
+      await emit("heartbeat:ok", { time: now.toISOString() });
     } else {
       log(`[heartbeat] action taken: ${response.slice(0, 100)}`);
       await channel.sendMessage(response);
+      await emit("heartbeat:action", { response: response.slice(0, 200) });
     }
   } catch (err) {
     logError("[heartbeat] failed", err);
-    await appendSystemLog(`Heartbeat failed: ${err}`);
+    await logFromError(err, "heartbeat");
+    await emit("heartbeat:failed", { error: String(err) });
   }
 }
 
@@ -259,31 +277,43 @@ function initCronScheduler(channel: Channel, channelConfig: ChannelConfig): void
 
   addJob("lessonsLoop", config.cron.schedules.lessonsLoop!, async () => {
     log("[cron] running lessons loop...");
+    await emit("cron:started", { job: "lessonsLoop" });
     try {
       await runLessonsLoop();
       log("[cron] lessons loop completed");
+      await emit("cron:completed", { job: "lessonsLoop" });
     } catch (err) {
       logError("[cron] lessons loop failed", err);
+      await logFromError(err, "cron:lessonsLoop");
+      await emit("cron:failed", { job: "lessonsLoop", error: String(err) });
     }
   });
 
   addJob("weeklyCompression", config.cron.schedules.weeklyCompression!, async () => {
     log("[cron] running weekly compression...");
+    await emit("cron:started", { job: "weeklyCompression" });
     try {
       await runWeeklyCompression();
       log("[cron] weekly compression completed");
+      await emit("cron:completed", { job: "weeklyCompression" });
     } catch (err) {
       logError("[cron] weekly compression failed", err);
+      await logFromError(err, "cron:weeklyCompression");
+      await emit("cron:failed", { job: "weeklyCompression", error: String(err) });
     }
   });
 
   addJob("monthlyCompression", config.cron.schedules.monthlyCompression!, async () => {
     log("[cron] running monthly compression...");
+    await emit("cron:started", { job: "monthlyCompression" });
     try {
       await runMonthlyCompression();
       log("[cron] monthly compression completed");
+      await emit("cron:completed", { job: "monthlyCompression" });
     } catch (err) {
       logError("[cron] monthly compression failed", err);
+      await logFromError(err, "cron:monthlyCompression");
+      await emit("cron:failed", { job: "monthlyCompression", error: String(err) });
     }
   });
 
@@ -298,6 +328,7 @@ export async function startDaemon(): Promise<void> {
 
   await saveState();
   await appendSystemLog(`Daemon started (PID: ${process.pid})`);
+  await emit("daemon:startup", { pid: process.pid });
 
   log(
     `juneclaw daemon started — polling ${ch.name} (${ch.phone}) every ${config.poll.intervalMs}ms`,
@@ -307,6 +338,7 @@ export async function startDaemon(): Promise<void> {
 
   const shutdown = async (signal: string) => {
     log(`Received ${signal}, shutting down...`);
+    await emit("daemon:shutdown", { signal });
     stopAllCron();
 
     // Write handoff for next session
@@ -321,8 +353,8 @@ export async function startDaemon(): Promise<void> {
     process.exit(0);
   };
 
-  process.on("SIGTERM", () => shutdown("SIGTERM"));
-  process.on("SIGINT", () => shutdown("SIGINT"));
+  process.on("SIGTERM", () => { shutdown("SIGTERM").catch(() => process.exit(1)); });
+  process.on("SIGINT", () => { shutdown("SIGINT").catch(() => process.exit(1)); });
 
   // Main poll loop
   while (true) {
