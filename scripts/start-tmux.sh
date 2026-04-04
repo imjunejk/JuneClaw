@@ -22,10 +22,10 @@ fi
 # Kill any existing JuneClaw node processes
 pkill -f "JuneClaw/dist/index" 2>/dev/null || true
 
-# Kill existing tmux session if any
+# Kill existing tmux session (stale after pkill) and recreate fresh
 if tmux has-session -t "$SESSION" 2>/dev/null; then
-  echo "Session '$SESSION' already exists. Attaching..."
-  exec tmux attach-session -t "$SESSION"
+  echo "Killing stale tmux session '$SESSION'..."
+  tmux kill-session -t "$SESSION" 2>/dev/null || true
 fi
 
 # Create new session with gateway window
