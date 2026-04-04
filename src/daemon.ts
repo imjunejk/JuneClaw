@@ -62,6 +62,7 @@ const state: DaemonState = {
 };
 
 const quietMode = new Map<string, boolean>();
+let quietHoursOverrideUntil: number = 0;
 
 const processedIds = new Set<number>();
 let processing = false;
@@ -146,6 +147,7 @@ async function saveState(): Promise<void> {
 }
 
 function isQuietHour(ch: ChannelConfig): boolean {
+  if (Date.now() < quietHoursOverrideUntil) return false;
   const now = new Date();
   const hour = Number(
     now.toLocaleString("en-US", {
@@ -471,6 +473,9 @@ export async function startDaemon(): Promise<void> {
           processedIds.add(msg.id);
 
           log(`[incoming] ${msg.sender}: ${msg.text.slice(0, 80)}...`);
+
+          // User message → override quiet hours for 1 hour
+          quietHoursOverrideUntil = Date.now() + 60 * 60 * 1000;
 
           try {
             processing = true;
