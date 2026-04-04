@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { writeFile, unlink, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -103,7 +104,7 @@ export async function runClaude(opts: {
   // Write system prompt to temp file to avoid arg length / null byte issues
   const promptDir = join(tmpdir(), "juneclaw");
   await mkdir(promptDir, { recursive: true });
-  const promptFile = join(promptDir, `sysprompt-${Date.now()}.md`);
+  const promptFile = join(promptDir, `sysprompt-${randomUUID()}.md`);
   await writeFile(promptFile, opts.systemPrompt, "utf-8");
 
   const args = [
