@@ -66,6 +66,27 @@ let quietHoursOverrideUntil: number = 0;
 
 const processedIds = new Set<number>();
 let processing = false;
+const btwQueue: string[] = [];
+let progressTimer: ReturnType<typeof setTimeout> | null = null;
+let progressInterval: ReturnType<typeof setInterval> | null = null;
+
+function startProgressUpdates(channel: Channel): void {
+  let count = 0;
+  progressTimer = setTimeout(() => {
+    channel.sendMessage("작업 진행 중...").catch(() => {});
+    count++;
+    progressInterval = setInterval(() => {
+      count++;
+      const mins = Math.floor((config.progress.firstDelayMs + count * config.progress.intervalMs) / 60_000);
+      channel.sendMessage(`작업 진행 중... (${mins}분 경과)`).catch(() => {});
+    }, config.progress.intervalMs);
+  }, config.progress.firstDelayMs);
+}
+
+function stopProgressUpdates(): void {
+  if (progressTimer) { clearTimeout(progressTimer); progressTimer = null; }
+  if (progressInterval) { clearInterval(progressInterval); progressInterval = null; }
+}
 
 async function killDuplicateProcesses(): Promise<void> {
   try {
@@ -465,24 +486,53 @@ export async function startDaemon(): Promise<void> {
   // Main poll loop
   while (true) {
     try {
-      if (!processing) {
-        const messages = await channel.pollNewMessages();
+      const messages = await channel.pollNewMessages();
 
-        for (const msg of messages) {
-          if (processedIds.has(msg.id)) continue;
-          processedIds.add(msg.id);
+      for (const msg of messages) {
+        if (processedIds.has(msg.id)) continue;
+        processedIds.add(msg.id);
 
-          log(`[incoming] ${msg.sender}: ${msg.text.slice(0, 80)}...`);
+        // /btw while processing — queue for follow-up
+        if (processing && msg.text.trim().startsWith("/btw ")) {
+          const btw = msg.text.trim().slice(5);
+          btwQueue.push(btw);
+          log(`[btw] queued: ${btw.slice(0, 60)}...`);
+          await channel.sendMessage(`메모 접수: ${btw.slice(0, 40)}...`);
+          continue;
+        }
 
-          // User message → override quiet hours for 1 hour
-          quietHoursOverrideUntil = Date.now() + 60 * 60 * 1000;
+        // Skip if already processing
+        if (processing) continue;
 
+        log(`[incoming] ${msg.sender}: ${msg.text.slice(0, 80)}...`);
+
+        // User message → override quiet hours for 1 hour
+        quietHoursOverrideUntil = Date.now() + 60 * 60 * 1000;
+
+        try {
+          processing = true;
+          startProgressUpdates(channel);
+          await processMessage(channel, ch, msg.text);
+        } catch (err) {
+          logError("Failed to process message", err);
+          await channel.sendMessage("처리 중 오류가 발생했습니다.");
+        } finally {
+          stopProgressUpdates();
+          processing = false;
+        }
+
+        // Process /btw queue as follow-up
+        if (btwQueue.length > 0) {
+          const btws = btwQueue.splice(0);
+          const followUp = btws.length === 1
+            ? `[작업 중 추가 메시지] ${btws[0]}`
+            : `[작업 중 추가 메시지]\n${btws.map((b) => `- ${b}`).join("\n")}`;
+          log(`[btw] processing ${btws.length} queued message(s)`);
           try {
             processing = true;
-            await processMessage(channel, ch, msg.text);
+            await processMessage(channel, ch, followUp);
           } catch (err) {
-            logError("Failed to process message", err);
-            await channel.sendMessage("처리 중 오류가 발생했습니다.");
+            logError("Failed to process /btw follow-up", err);
           } finally {
             processing = false;
           }
