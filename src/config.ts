@@ -40,6 +40,7 @@ export const config = {
     lastSeen: join(home, ".clawd", "last-seen.json"),
     logs: join(home, ".clawd", "logs"),
     statePath: join(home, ".clawd", "state.json"),
+    pidFile: join(home, ".clawd", "daemon.pid"),
   },
   broadcast: {
     recipientsPath: join(home, "openclaw", "market", "recipients.json"),

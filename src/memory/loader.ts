@@ -64,6 +64,8 @@ async function fetchRecentMessages(): Promise<string | null> {
       "--json",
     ]);
 
+    if (!stdout || !stdout.trim()) return null;
+
     const messages: ImsgHistoryMessage[] = stdout
       .trim()
       .split("\n")

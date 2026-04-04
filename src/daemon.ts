@@ -1,4 +1,4 @@
-import { writeFile, mkdir } from "node:fs/promises";
+import { writeFile, readFile, unlink, mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 import { config, type ChannelConfig } from "./config.js";
 import { createIMessageChannel } from "./gateway/imessage.js";
@@ -37,6 +37,44 @@ const state: DaemonState = {
 };
 
 const quietMode = new Map<string, boolean>();
+
+// BUG 1 fix: dedup set + processing lock to prevent duplicate replies
+const processedIds = new Set<number>();
+let processing = false;
+
+// BUG 3 fix: PID file singleton enforcement
+async function acquirePidLock(): Promise<void> {
+  await mkdir(dirname(config.paths.pidFile), { recursive: true });
+
+  try {
+    const existing = await readFile(config.paths.pidFile, "utf-8");
+    const pid = parseInt(existing.trim(), 10);
+    if (!isNaN(pid)) {
+      try {
+        process.kill(pid, 0); // check if process exists
+        console.error(
+          `Another daemon instance is already running (PID ${pid}). Exiting.`,
+        );
+        process.exit(1);
+      } catch {
+        // Process doesn't exist — stale PID file, safe to overwrite
+        log(`Removing stale PID file (PID ${pid} not running)`);
+      }
+    }
+  } catch {
+    // No PID file — first launch
+  }
+
+  await writeFile(config.paths.pidFile, String(process.pid), "utf-8");
+}
+
+async function releasePidLock(): Promise<void> {
+  try {
+    await unlink(config.paths.pidFile);
+  } catch {
+    // ignore
+  }
+}
 
 async function saveState(): Promise<void> {
   await mkdir(dirname(config.paths.statePath), { recursive: true });
@@ -150,11 +188,11 @@ async function runHeartbeat(
     await saveState();
 
     const response = result.response.trim();
-    if (!response.startsWith("HEARTBEAT_OK")) {
+    if (response.includes("HEARTBEAT_OK") || response.includes("NO_REPLY")) {
+      log("[heartbeat] OK");
+    } else {
       log(`[heartbeat] action taken: ${response.slice(0, 100)}`);
       await channel.sendMessage(response);
-    } else {
-      log("[heartbeat] OK");
     }
   } catch (err) {
     logError("[heartbeat] failed", err);
@@ -209,6 +247,9 @@ function initCronScheduler(channel: Channel, channelConfig: ChannelConfig): void
 }
 
 export async function startDaemon(): Promise<void> {
+  // BUG 3: Singleton enforcement — refuse to start if another instance is running
+  await acquirePidLock();
+
   const ch = config.channels.june;
   const channel = createIMessageChannel(ch.phone, ch.chatId);
 
@@ -226,6 +267,7 @@ export async function startDaemon(): Promise<void> {
   const shutdown = async (signal: string) => {
     log(`Received ${signal}, shutting down...`);
     stopAllCron();
+    await releasePidLock();
     await appendSystemLog(`Daemon shutdown (${signal})`);
     await saveState();
     process.exit(0);
@@ -237,20 +279,38 @@ export async function startDaemon(): Promise<void> {
   // Main poll loop
   while (true) {
     try {
-      const messages = await channel.pollNewMessages();
+      // Skip poll if already processing a message
+      if (!processing) {
+        const messages = await channel.pollNewMessages();
 
-      for (const msg of messages) {
-        log(`[incoming] ${msg.sender}: ${msg.text.slice(0, 80)}...`);
+        for (const msg of messages) {
+          // BUG 1: Skip already-processed message IDs
+          if (processedIds.has(msg.id)) continue;
+          processedIds.add(msg.id);
 
-        try {
-          await processMessage(channel, ch, msg.text);
-        } catch (err) {
-          logError("Failed to process message", err);
-          await channel.sendMessage("처리 중 오류가 발생했습니다.");
+          log(`[incoming] ${msg.sender}: ${msg.text.slice(0, 80)}...`);
+
+          try {
+            processing = true;
+            await processMessage(channel, ch, msg.text);
+          } catch (err) {
+            logError("Failed to process message", err);
+            await channel.sendMessage("처리 중 오류가 발생했습니다.");
+          } finally {
+            processing = false;
+          }
         }
       }
     } catch (err) {
       logError("Poll cycle error", err);
+    }
+
+    // Prevent unbounded growth of the dedup set
+    if (processedIds.size > 10_000) {
+      const ids = Array.from(processedIds);
+      for (const id of ids.slice(0, ids.length - 1_000)) {
+        processedIds.delete(id);
+      }
     }
 
     await new Promise((resolve) => setTimeout(resolve, config.poll.intervalMs));
