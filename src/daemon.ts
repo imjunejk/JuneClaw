@@ -7,6 +7,9 @@ import { runClaude } from "./agent/runner.js";
 import { getSessionId, setSessionId } from "./agent/session.js";
 import { buildSystemPrompt } from "./memory/loader.js";
 import { appendDailyLog, appendSystemLog } from "./memory/writer.js";
+import { broadcast } from "./gateway/broadcast.js";
+import { addJob, stopAll as stopAllCron } from "./scheduler/cron.js";
+import { runAlgoScript } from "./algo/runner.js";
 import type { Channel } from "./gateway/types.js";
 
 function log(msg: string): void {
@@ -159,6 +162,52 @@ async function runHeartbeat(
   }
 }
 
+async function runAlgoAndBroadcast(scriptName: string, reportType: string): Promise<void> {
+  log(`[algo] running ${scriptName}...`);
+  try {
+    const result = await runAlgoScript(scriptName);
+    if (result.error) {
+      logError(`[algo] ${scriptName} failed`, result.error);
+      return;
+    }
+    if (!result.output) {
+      log(`[algo] ${scriptName} produced no output`);
+      return;
+    }
+    const sent = await broadcast(reportType, result.output);
+    log(`[algo] ${scriptName} → broadcast to ${sent.length}: ${sent.join(", ")}`);
+  } catch (err) {
+    logError(`[algo] ${scriptName} broadcast failed`, err);
+  }
+}
+
+function initCronScheduler(channel: Channel, channelConfig: ChannelConfig): void {
+  log("[cron] initializing scheduler...");
+
+  // Heartbeat cron (replaces setInterval)
+  addJob("heartbeat", config.cron.schedules.heartbeat!, () =>
+    runHeartbeat(channel, channelConfig),
+  );
+
+  // Algo cron jobs
+  const algoJobs: Array<{ name: string; script: string; reportType: string }> = [
+    { name: "reporter", script: "reporter", reportType: "unified" },
+    { name: "options_monitor", script: "options_monitor", reportType: "options" },
+    { name: "stock_scanner", script: "stock_scanner", reportType: "unified" },
+    { name: "pump_detector", script: "pump_detector", reportType: "pump" },
+  ];
+
+  for (const { name, script, reportType } of algoJobs) {
+    const schedule = config.cron.schedules[name];
+    if (schedule) {
+      addJob(name, schedule, () => runAlgoAndBroadcast(script, reportType));
+      log(`[cron] scheduled ${name}: ${schedule}`);
+    }
+  }
+
+  log("[cron] scheduler initialized");
+}
+
 export async function startDaemon(): Promise<void> {
   const ch = config.channels.june;
   const channel = createIMessageChannel(ch.phone, ch.chatId);
@@ -170,16 +219,13 @@ export async function startDaemon(): Promise<void> {
     `juneclaw daemon started — polling ${ch.name} (${ch.phone}) every ${config.poll.intervalMs}ms`,
   );
 
-  // Heartbeat interval
-  setInterval(() => {
-    runHeartbeat(channel, ch).catch((err) =>
-      logError("Heartbeat interval error", err),
-    );
-  }, config.poll.heartbeatIntervalMs);
+  // Initialize cron scheduler (handles heartbeat + algo jobs)
+  initCronScheduler(channel, ch);
 
   // Graceful shutdown
   const shutdown = async (signal: string) => {
     log(`Received ${signal}, shutting down...`);
+    stopAllCron();
     await appendSystemLog(`Daemon shutdown (${signal})`);
     await saveState();
     process.exit(0);

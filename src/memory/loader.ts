@@ -1,6 +1,10 @@
 import { readFile, unlink } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { join } from "node:path";
 import { config } from "../config.js";
+
+const execFileAsync = promisify(execFile);
 
 function truncate(text: string, maxChars: number): string {
   if (text.length <= maxChars) return text;
@@ -38,6 +42,59 @@ interface FileSpec {
   path: string;
   maxChars: number;
   deleteAfterLoad?: boolean;
+}
+
+interface ImsgHistoryMessage {
+  id: number;
+  text: string | null;
+  sender: string;
+  is_from_me: boolean;
+  created_at: string;
+}
+
+async function fetchRecentMessages(): Promise<string | null> {
+  try {
+    const chatId = config.channels.june.chatId;
+    const { stdout } = await execFileAsync("imsg", [
+      "history",
+      "--chat-id",
+      String(chatId),
+      "--limit",
+      "10",
+      "--json",
+    ]);
+
+    const messages: ImsgHistoryMessage[] = stdout
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line: string) => JSON.parse(line));
+
+    if (messages.length === 0) return null;
+
+    // Sort oldest first for conversation flow
+    messages.sort((a, b) => a.id - b.id);
+
+    const lines = messages
+      .filter((m) => m.text)
+      .map((m) => {
+        const time = new Date(m.created_at).toLocaleTimeString("en-US", {
+          timeZone: "America/Los_Angeles",
+          hour: "2-digit",
+          minute: "2-digit",
+          hour12: false,
+        });
+        const sender = m.is_from_me ? "Youngsu" : m.sender;
+        return `[${time}] ${sender}: ${m.text}`;
+      });
+
+    if (lines.length === 0) return null;
+
+    return `<recent_conversation>\n${lines.join("\n")}\n</recent_conversation>`;
+  } catch {
+    // Non-fatal: conversation history is supplementary
+    return null;
+  }
 }
 
 export async function buildSystemPrompt(
@@ -99,6 +156,9 @@ export async function buildSystemPrompt(
 
   const workspaceContext = `<workspace_context>\n${sections.join("\n\n")}\n</workspace_context>`;
 
+  // Fetch recent conversation history
+  const conversationHistory = await fetchRecentMessages();
+
   const phone = config.channels.june.phone;
   const runtimeContext = `<runtime_context>
 Time: ${formatTimePT(today)}
@@ -109,5 +169,10 @@ For background tasks: use Agent tool to spawn sub-agents
 Send iMessage: Bash("imsg send --to ${phone} --text \\"...\\"")
 </runtime_context>`;
 
-  return `${workspaceContext}\n\n${runtimeContext}`;
+  const parts = [workspaceContext];
+  if (conversationHistory) {
+    parts.push(conversationHistory);
+  }
+  parts.push(runtimeContext);
+  return parts.join("\n\n");
 }
