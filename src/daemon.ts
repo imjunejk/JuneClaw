@@ -67,17 +67,16 @@ let quietHoursOverrideUntil: number = 0;
 const processedIds = new Set<number>();
 let processing = false;
 const btwQueue: string[] = [];
+const pendingMessages: string[] = [];
 let progressTimer: ReturnType<typeof setTimeout> | null = null;
 let progressInterval: ReturnType<typeof setInterval> | null = null;
 
 function startProgressUpdates(channel: Channel): void {
-  let count = 0;
+  const startedAt = Date.now();
   progressTimer = setTimeout(() => {
     channel.sendMessage("작업 진행 중...").catch(() => {});
-    count++;
     progressInterval = setInterval(() => {
-      count++;
-      const mins = Math.floor((config.progress.firstDelayMs + count * config.progress.intervalMs) / 60_000);
+      const mins = Math.round((Date.now() - startedAt) / 60_000);
       channel.sendMessage(`작업 진행 중... (${mins}분 경과)`).catch(() => {});
     }, config.progress.intervalMs);
   }, config.progress.firstDelayMs);
@@ -501,8 +500,12 @@ export async function startDaemon(): Promise<void> {
           continue;
         }
 
-        // Skip if already processing
-        if (processing) continue;
+        // Queue normal messages while processing
+        if (processing) {
+          pendingMessages.push(msg.text);
+          log(`[pending] queued message while processing: ${msg.text.slice(0, 60)}...`);
+          continue;
+        }
 
         log(`[incoming] ${msg.sender}: ${msg.text.slice(0, 80)}...`);
 
@@ -530,12 +533,31 @@ export async function startDaemon(): Promise<void> {
           log(`[btw] processing ${btws.length} queued message(s)`);
           try {
             processing = true;
+            startProgressUpdates(channel);
             await processMessage(channel, ch, followUp);
           } catch (err) {
             logError("Failed to process /btw follow-up", err);
           } finally {
+            stopProgressUpdates();
             processing = false;
           }
+        }
+      }
+
+      // Process pending messages that arrived during processing
+      while (pendingMessages.length > 0) {
+        const pending = pendingMessages.shift()!;
+        log(`[pending] processing queued message: ${pending.slice(0, 60)}...`);
+        try {
+          processing = true;
+          startProgressUpdates(channel);
+          await processMessage(channel, ch, pending);
+        } catch (err) {
+          logError("Failed to process pending message", err);
+          await channel.sendMessage("처리 중 오류가 발생했습니다.");
+        } finally {
+          stopProgressUpdates();
+          processing = false;
         }
       }
     } catch (err) {
