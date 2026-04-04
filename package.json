@@ -1,0 +1,21 @@
+{
+  "name": "clawd",
+  "version": "0.1.0",
+  "description": "Personal AI assistant daemon — Claude CLI gateway over iMessage",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/index.ts",
+    "start": "node dist/index.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "private": true,
+  "devDependencies": {
+    "@types/node": "^25.5.2",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.2"
+  }
+}
