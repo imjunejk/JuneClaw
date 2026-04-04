@@ -9,7 +9,8 @@ export type RotationReason =
   | "task_failures"
   | "message_count"
   | "context_full"
-  | "token_threshold";
+  | "token_threshold"
+  | "smart_handoff";
 
 interface ChannelRotationState {
   consecutiveErrors: number;
@@ -98,7 +99,6 @@ export function shouldRotate(phone: string): RotationReason | null {
     maxConsecutiveErrors,
     maxTaskFailures,
     messageCountForceRotate,
-    tokenWarningPercent,
     tokenForceRotatePercent,
   } = config.contextRotation;
 
@@ -147,6 +147,19 @@ export function markHandoffDone(phone: string): void {
 
 export function getMessageCount(phone: string): number {
   return getState(phone).messageCount;
+}
+
+export function resetRotationState(phone: string): void {
+  const s = getState(phone);
+  s.consecutiveErrors = 0;
+  s.taskFailures.clear();
+  s.messageCount = 0;
+  s.lastUsage = null;
+  s.peakUsagePercent = 0;
+  s.cumulativeTokens = 0;
+  s.warningSent = false;
+  s.handoffDone = false;
+  s.lastRotatedAt = new Date().toISOString();
 }
 
 export async function executeRotation(

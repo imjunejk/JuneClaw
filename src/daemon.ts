@@ -8,12 +8,12 @@ import { config, type ChannelConfig } from "./config.js";
 import { createIMessageChannel } from "./gateway/imessage.js";
 import { handleCommand } from "./gateway/commands.js";
 import { runClaude } from "./agent/runner.js";
-import { getSessionId, setSessionId } from "./agent/session.js";
+import { getSessionId, setSessionId, clearSessionId } from "./agent/session.js";
 import { buildSystemPrompt } from "./memory/loader.js";
 import { appendDailyLog, appendSystemLog } from "./memory/writer.js";
 import { addJob, stopAll as stopAllCron } from "./scheduler/cron.js";
 import { cascadeKill, cleanupStaleAgents, archiveCompleted } from "./agent/subagents.js";
-import { writeHandoff } from "./memory/handoff.js";
+import { writeHandoff, writeSmartHandoff } from "./memory/handoff.js";
 import { emit } from "./hooks/events.js";
 import { logFromError } from "./hooks/incident.js";
 import {
@@ -27,9 +27,9 @@ import {
   shouldHandoff,
   markHandoffDone,
   executeRotation,
+  resetRotationState,
   getMessageCount,
 } from "./agent/context-rotation.js";
-import { writeSmartHandoff } from "./memory/handoff.js";
 import {
   runLessonsLoop,
   runWeeklyCompression,
@@ -262,10 +262,20 @@ async function processMessage(
         `[Context ${pct}%] 핸드오프 준비 중...`,
       );
       try {
-        await writeSmartHandoff(result.sessionId);
+        const handoffResult = await writeSmartHandoff(result.sessionId!);
+        if (handoffResult.usage) {
+          recordUsage(phone, handoffResult.usage);
+          log(`[handoff] used ${handoffResult.usage.totalTokens.toLocaleString()} additional tokens`);
+        }
         markHandoffDone(phone);
         log("[handoff] HANDOFF.md written by Claude");
-        await executeRotation(phone, "token_threshold");
+
+        // Reset session directly — do NOT call executeRotation (it overwrites HANDOFF.md)
+        await clearSessionId(phone);
+        await appendSystemLog(
+          `Smart handoff completed for ${phone}: context ${pct}%`,
+        );
+        resetRotationState(phone);
         await emit("rotation:triggered", { reason: "smart_handoff" });
         await channel.sendMessage(
           `핸드오프 완료. 다음 메시지부터 새 세션으로 시작합니다.`,
@@ -273,10 +283,15 @@ async function processMessage(
       } catch (err) {
         logError("[handoff] smart handoff failed, falling back to basic", err);
         markHandoffDone(phone);
+        // Write basic handoff + rotate immediately so session doesn't continue degraded
+        await executeRotation(phone, "token_threshold");
+        await channel.sendMessage(
+          `핸드오프 실패 — 기본 핸드오프로 세션을 리셋합니다.`,
+        );
       }
     }
 
-    // Phase 3: Force rotation (90%) — fallback if handoff didn't trigger
+    // Phase 3: Force rotation (90%) — fallback if handoff didn't trigger or was skipped
     const postReason = shouldRotate(phone);
     if (postReason) {
       log(`[context-rotation] triggered after processing: ${postReason}`);

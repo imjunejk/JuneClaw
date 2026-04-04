@@ -1,7 +1,7 @@
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { config } from "../config.js";
-import { runClaude } from "../agent/runner.js";
+import { runClaude, type RunResult } from "../agent/runner.js";
 
 interface HandoffOptions {
   reason: string;
@@ -69,7 +69,7 @@ Follow this exact template — fill in every section based on your actual conver
 
 Be concise but complete. The next session has NO memory of this conversation — everything it needs must be in this file.`;
 
-export async function writeSmartHandoff(sessionId: string): Promise<string> {
+export async function writeSmartHandoff(sessionId: string): Promise<RunResult> {
   const result = await runClaude({
     prompt: HANDOFF_PROMPT,
     systemPrompt: "You are Youngsu. Write the handoff document based on your conversation history.",
@@ -77,6 +77,16 @@ export async function writeSmartHandoff(sessionId: string): Promise<string> {
   });
 
   const handoffContent = result.response;
+
+  // Validate that Claude produced a meaningful handoff
+  const hasStructure =
+    handoffContent.includes("## Current Work") ||
+    handoffContent.includes("## Progress") ||
+    handoffContent.includes("# HANDOFF");
+  if (!hasStructure || handoffContent.trim().length < 100) {
+    throw new Error("Claude produced invalid handoff content");
+  }
+
   await writeFile(join(config.workspace, "HANDOFF.md"), handoffContent, "utf-8");
-  return handoffContent;
+  return result;
 }
