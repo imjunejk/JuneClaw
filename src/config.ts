@@ -28,12 +28,16 @@ export const config = {
       "WebSearch",
       "TodoWrite",
     ],
-    timeoutMs: 180_000,
+    timeoutMs: 600_000,
     model: process.env.JUNECLAW_MODEL,
   },
   poll: {
     intervalMs: 2000,
     heartbeatIntervalMs: 10 * 60 * 1000,
+  },
+  progress: {
+    firstDelayMs: 15_000,
+    intervalMs: 45_000,
   },
   paths: {
     sessions: join(home, ".juneclaw", "sessions.json"),
