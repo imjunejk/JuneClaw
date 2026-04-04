@@ -4,17 +4,52 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { config } from "../config.js";
 
+interface ClaudeUsage {
+  input_tokens: number;
+  cache_creation_input_tokens: number;
+  cache_read_input_tokens: number;
+  output_tokens: number;
+}
+
+interface ClaudeModelUsageEntry {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadInputTokens: number;
+  cacheCreationInputTokens: number;
+  contextWindow: number;
+  maxOutputTokens: number;
+  costUSD: number;
+}
+
 interface ClaudeJsonOutput {
   type: string;
   result: string;
   session_id: string;
   is_error: boolean;
   duration_ms: number;
+  num_turns: number;
+  total_cost_usd: number;
+  usage: ClaudeUsage;
+  modelUsage: Record<string, ClaudeModelUsageEntry>;
+}
+
+export interface UsageInfo {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  totalTokens: number;
+  contextTokens: number;
+  contextWindow: number;
+  usagePercent: number;
+  costUSD: number;
+  numTurns: number;
 }
 
 export interface RunResult {
   response: string;
   sessionId?: string;
+  usage?: UsageInfo;
 }
 
 function spawnClaude(args: string[], prompt: string): Promise<string> {
@@ -99,9 +134,53 @@ export async function runClaude(opts: {
       throw new Error(`Claude returned error: ${parsed.result}`);
     }
 
+    // Extract usage info from modelUsage (has contextWindow) or fallback to usage
+    let usage: UsageInfo | undefined;
+    const modelEntry = Object.values(parsed.modelUsage ?? {})[0];
+    if (modelEntry) {
+      // Context usage = input tokens only (output tokens don't consume context window)
+      const contextTokens =
+        modelEntry.inputTokens +
+        modelEntry.cacheReadInputTokens +
+        modelEntry.cacheCreationInputTokens;
+      const totalTokens = contextTokens + modelEntry.outputTokens;
+      usage = {
+        inputTokens: modelEntry.inputTokens,
+        outputTokens: modelEntry.outputTokens,
+        cacheReadTokens: modelEntry.cacheReadInputTokens,
+        cacheCreationTokens: modelEntry.cacheCreationInputTokens,
+        totalTokens,
+        contextTokens,
+        contextWindow: modelEntry.contextWindow,
+        usagePercent: modelEntry.contextWindow > 0
+          ? (contextTokens / modelEntry.contextWindow) * 100
+          : 0,
+        costUSD: parsed.total_cost_usd ?? modelEntry.costUSD,
+        numTurns: parsed.num_turns ?? 1,
+      };
+    } else if (parsed.usage) {
+      const u = parsed.usage;
+      const contextTokens =
+        u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens;
+      const totalTokens = contextTokens + u.output_tokens;
+      usage = {
+        inputTokens: u.input_tokens,
+        outputTokens: u.output_tokens,
+        cacheReadTokens: u.cache_read_input_tokens,
+        cacheCreationTokens: u.cache_creation_input_tokens,
+        totalTokens,
+        contextTokens,
+        contextWindow: 0,
+        usagePercent: 0,
+        costUSD: parsed.total_cost_usd ?? 0,
+        numTurns: parsed.num_turns ?? 1,
+      };
+    }
+
     return {
       response: parsed.result,
       sessionId: parsed.session_id,
+      usage,
     };
   };
 
