@@ -1,8 +1,5 @@
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
+import { spawn } from "node:child_process";
 import { config } from "../config.js";
-
-const execFileAsync = promisify(execFile);
 
 interface ClaudeJsonOutput {
   type: string;
@@ -15,6 +12,49 @@ interface ClaudeJsonOutput {
 export interface RunResult {
   response: string;
   sessionId?: string;
+}
+
+function spawnClaude(args: string[], prompt: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(config.claude.bin, args, {
+      stdio: ["pipe", "pipe", "pipe"],
+      env: { ...process.env, PATH: process.env.PATH ?? "" },
+    });
+
+    // Write prompt via stdin
+    child.stdin.write(prompt, "utf-8");
+    child.stdin.end();
+
+    let stdout = "";
+    let stderr = "";
+
+    child.stdout.on("data", (chunk: Buffer) => {
+      stdout += chunk.toString();
+    });
+
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString();
+    });
+
+    const timer = setTimeout(() => {
+      child.kill("SIGTERM");
+      reject(new Error("TIMEOUT: claude exceeded time limit"));
+    }, config.claude.timeoutMs);
+
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (code !== 0) {
+        reject(new Error(`claude exited ${code}: ${stderr.slice(0, 500)}`));
+      } else {
+        resolve(stdout);
+      }
+    });
+
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+  });
 }
 
 export async function runClaude(opts: {
@@ -31,7 +71,7 @@ export async function runClaude(opts: {
     "--system-prompt",
     opts.systemPrompt,
     "--allowedTools",
-    config.claude.allowedTools.join(","),
+    config.claude.allowedTools.join(" "),
   ];
 
   if (opts.sessionId) {
@@ -42,16 +82,9 @@ export async function runClaude(opts: {
     args.push("--model", config.claude.model);
   }
 
-  args.push(opts.prompt);
-
   const attempt = async (): Promise<RunResult> => {
-    const { stdout } = await execFileAsync(config.claude.bin, args, {
-      timeout: config.claude.timeoutMs,
-      maxBuffer: 10 * 1024 * 1024,
-      env: { ...process.env, PATH: process.env.PATH },
-    });
-
-    const parsed = JSON.parse(stdout.trim()) as ClaudeJsonOutput;
+    const raw = await spawnClaude(args, opts.prompt);
+    const parsed = JSON.parse(raw.trim()) as ClaudeJsonOutput;
 
     if (parsed.is_error) {
       throw new Error(`Claude returned error: ${parsed.result}`);
@@ -66,8 +99,7 @@ export async function runClaude(opts: {
   try {
     return await attempt();
   } catch (err) {
-    // Retry once on timeout
-    if (err instanceof Error && err.message.includes("TIMEOUT")) {
+    if (err instanceof Error && err.message.startsWith("TIMEOUT")) {
       return await attempt();
     }
     throw err;
