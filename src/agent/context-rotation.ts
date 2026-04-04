@@ -20,6 +20,7 @@ interface ChannelRotationState {
   peakUsagePercent: number;
   cumulativeTokens: number;
   warningSent: boolean;
+  handoffDone: boolean;
 }
 
 const states = new Map<string, ChannelRotationState>();
@@ -36,6 +37,7 @@ function getState(phone: string): ChannelRotationState {
       peakUsagePercent: 0,
       cumulativeTokens: 0,
       warningSent: false,
+      handoffDone: false,
     };
     states.set(phone, s);
   }
@@ -119,13 +121,28 @@ export function shouldRotate(phone: string): RotationReason | null {
 export function shouldWarnContext(phone: string): boolean {
   const s = getState(phone);
   if (s.warningSent) return false;
-  const { tokenWarningPercent, tokenForceRotatePercent } = config.contextRotation;
+  const { tokenWarningPercent, tokenHandoffPercent } = config.contextRotation;
   const shouldWarn =
     s.lastUsage !== null &&
     s.lastUsage.usagePercent >= tokenWarningPercent &&
-    s.lastUsage.usagePercent < tokenForceRotatePercent;
+    s.lastUsage.usagePercent < tokenHandoffPercent;
   if (shouldWarn) s.warningSent = true;
   return shouldWarn;
+}
+
+export function shouldHandoff(phone: string): boolean {
+  const s = getState(phone);
+  if (s.handoffDone) return false;
+  const { tokenHandoffPercent, tokenForceRotatePercent } = config.contextRotation;
+  return (
+    s.lastUsage !== null &&
+    s.lastUsage.usagePercent >= tokenHandoffPercent &&
+    s.lastUsage.usagePercent < tokenForceRotatePercent
+  );
+}
+
+export function markHandoffDone(phone: string): void {
+  getState(phone).handoffDone = true;
 }
 
 export function getMessageCount(phone: string): number {
@@ -167,5 +184,6 @@ export async function executeRotation(
   s.peakUsagePercent = 0;
   s.cumulativeTokens = 0;
   s.warningSent = false;
+  s.handoffDone = false;
   s.lastRotatedAt = new Date().toISOString();
 }

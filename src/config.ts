@@ -55,7 +55,8 @@ export const config = {
     messageCountWarning: 35,
     messageCountForceRotate: 40,
     tokenWarningPercent: 60,
-    tokenForceRotatePercent: 80,
+    tokenHandoffPercent: 78,
+    tokenForceRotatePercent: 90,
   },
   cron: {
     schedules: {

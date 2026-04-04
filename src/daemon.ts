@@ -24,9 +24,12 @@ import {
   recordUsage,
   shouldRotate,
   shouldWarnContext,
+  shouldHandoff,
+  markHandoffDone,
   executeRotation,
   getMessageCount,
 } from "./agent/context-rotation.js";
+import { writeSmartHandoff } from "./memory/handoff.js";
 import {
   runLessonsLoop,
   runWeeklyCompression,
@@ -243,7 +246,7 @@ async function processMessage(
     await appendDailyLog(name, text, result.response);
     await emit("message:responded", { to: name });
 
-    // Check token-based and message-count rotation after processing
+    // Phase 1: Early warning (60%)
     if (shouldWarnContext(phone) && result.usage) {
       log(`[context] warning: ${result.usage.usagePercent.toFixed(1)}% context used`);
       await channel.sendMessage(
@@ -251,6 +254,29 @@ async function processMessage(
       );
     }
 
+    // Phase 2: Smart handoff (78%) — Claude writes HANDOFF.md from session context
+    if (shouldHandoff(phone) && result.sessionId) {
+      const pct = result.usage?.usagePercent.toFixed(0) ?? "?";
+      log(`[handoff] context ${pct}% — requesting smart handoff from Claude`);
+      await channel.sendMessage(
+        `[Context ${pct}%] 핸드오프 준비 중...`,
+      );
+      try {
+        await writeSmartHandoff(result.sessionId);
+        markHandoffDone(phone);
+        log("[handoff] HANDOFF.md written by Claude");
+        await executeRotation(phone, "token_threshold");
+        await emit("rotation:triggered", { reason: "smart_handoff" });
+        await channel.sendMessage(
+          `핸드오프 완료. 다음 메시지부터 새 세션으로 시작합니다.`,
+        );
+      } catch (err) {
+        logError("[handoff] smart handoff failed, falling back to basic", err);
+        markHandoffDone(phone);
+      }
+    }
+
+    // Phase 3: Force rotation (90%) — fallback if handoff didn't trigger
     const postReason = shouldRotate(phone);
     if (postReason) {
       log(`[context-rotation] triggered after processing: ${postReason}`);
