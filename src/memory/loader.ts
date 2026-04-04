@@ -210,13 +210,14 @@ export async function buildSystemPrompt(
   // Load skill definitions from .openclaw/skills/
   const skillsDir = join(ws, ".openclaw", "skills");
   try {
-    const skillDirs = await readdir(skillsDir);
-    for (const skillName of skillDirs) {
-      const skillPath = join(skillsDir, skillName, "SKILL.md");
+    const skillEntries = await readdir(skillsDir, { withFileTypes: true });
+    for (const entry of skillEntries) {
+      if (!entry.isDirectory()) continue;
+      const skillPath = join(skillsDir, entry.name, "SKILL.md");
       const content = await loadFileOrNull(skillPath);
       if (content) {
         sections.push(
-          `## SKILL: ${skillName}\n${truncate(content.trim(), 2000)}`,
+          `## SKILL: ${entry.name}\n${truncate(content.trim(), 2000)}`,
         );
       }
     }
@@ -268,5 +269,13 @@ Send iMessage: Bash("imsg send --to ${phone} --text \\"...\\"")
     parts.push(conversationHistory);
   }
   parts.push(runtimeContext);
-  return parts.join("\n\n");
+
+  const prompt = parts.join("\n\n");
+  const PROMPT_WARN_THRESHOLD = 80_000;
+  if (prompt.length > PROMPT_WARN_THRESHOLD) {
+    console.warn(
+      `[loader] system prompt is ${prompt.length} chars (threshold: ${PROMPT_WARN_THRESHOLD})`,
+    );
+  }
+  return prompt;
 }

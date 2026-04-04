@@ -3,6 +3,7 @@ import { join, dirname } from "node:path";
 import { config } from "../config.js";
 
 const incidentLog = join(config.workspace, "memory", "incidents.jsonl");
+let dirEnsured = false;
 
 export interface Incident {
   timestamp: string;
@@ -14,7 +15,10 @@ export interface Incident {
 }
 
 export async function logIncident(incident: Incident): Promise<void> {
-  await mkdir(dirname(incidentLog), { recursive: true });
+  if (!dirEnsured) {
+    await mkdir(dirname(incidentLog), { recursive: true });
+    dirEnsured = true;
+  }
   const line = JSON.stringify(incident) + "\n";
   await appendFile(incidentLog, line, "utf-8");
 }
@@ -24,10 +28,14 @@ export async function logFromError(
   context: string,
   severity: Incident["severity"] = "medium",
 ): Promise<void> {
-  const msg = err instanceof Error ? err.message : String(err);
-  await logIncident({
-    timestamp: new Date().toISOString(),
-    severity,
-    symptom: `${context}: ${msg}`,
-  });
+  try {
+    const msg = err instanceof Error ? err.message : String(err);
+    await logIncident({
+      timestamp: new Date().toISOString(),
+      severity,
+      symptom: `${context}: ${msg}`,
+    });
+  } catch {
+    // Best-effort logging — never propagate
+  }
 }

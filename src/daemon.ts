@@ -206,8 +206,8 @@ async function processMessage(
     }
   } catch (err) {
     recordError(phone);
-    await emit("message:error", { error: String(err) });
-    await logFromError(err, `processMessage from ${name}`);
+    await emit("message:error", { error: String(err) }).catch(() => {});
+    await logFromError(err, `processMessage from ${name}`).catch(() => {});
 
     if (
       err instanceof Error &&
@@ -255,7 +255,7 @@ async function runHeartbeat(
     const response = result.response.trim();
     if (response.includes("HEARTBEAT_OK") || response.includes("NO_REPLY")) {
       log("[heartbeat] OK");
-      await emit("heartbeat:ok");
+      await emit("heartbeat:ok", { time: now.toISOString() });
     } else {
       log(`[heartbeat] action taken: ${response.slice(0, 100)}`);
       await channel.sendMessage(response);
@@ -353,8 +353,8 @@ export async function startDaemon(): Promise<void> {
     process.exit(0);
   };
 
-  process.on("SIGTERM", () => shutdown("SIGTERM"));
-  process.on("SIGINT", () => shutdown("SIGINT"));
+  process.on("SIGTERM", () => { shutdown("SIGTERM").catch(() => process.exit(1)); });
+  process.on("SIGINT", () => { shutdown("SIGINT").catch(() => process.exit(1)); });
 
   // Main poll loop
   while (true) {
