@@ -8,7 +8,6 @@ const memoryDir = join(config.workspace, "memory");
 const dailyDir = join(memoryDir, "daily");
 const weeklyDir = join(memoryDir, "weekly");
 const monthlyDir = join(memoryDir, "monthly");
-const lessonsDir = join(memoryDir, "lessons");
 
 async function loadFileOrNull(path: string): Promise<string | null> {
   try {
