@@ -43,11 +43,11 @@ async function loadStore(): Promise<SessionStore> {
 }
 
 async function saveStore(store: SessionStore): Promise<void> {
-  await mkdir(dirname(config.paths.sessions), { recursive: true });
+  await mkdir(dirname(config.paths.sessions), { recursive: true, mode: 0o700 });
   await writeFile(
     config.paths.sessions,
     JSON.stringify(store, null, 2),
-    "utf-8",
+    { encoding: "utf-8", mode: 0o600 },
   );
 }
 

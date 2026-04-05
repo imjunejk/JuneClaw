@@ -162,6 +162,19 @@ export function resetRotationState(phone: string): void {
   s.lastRotatedAt = new Date().toISOString();
 }
 
+/** Remove rotation states idle for more than 24 hours. */
+export function pruneStaleStates(): number {
+  const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+  let pruned = 0;
+  for (const [phone, s] of states) {
+    if (s.lastRotatedAt && new Date(s.lastRotatedAt).getTime() < cutoff && s.messageCount === 0) {
+      states.delete(phone);
+      pruned++;
+    }
+  }
+  return pruned;
+}
+
 export async function executeRotation(
   phone: string,
   reason: RotationReason,

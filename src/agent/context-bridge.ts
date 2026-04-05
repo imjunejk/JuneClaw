@@ -36,7 +36,7 @@ export function getRecentContext(): string | null {
 
   const lines = recentExchanges.map((ex) => {
     const time = new Date(ex.timestamp).toLocaleTimeString("en-US", {
-      timeZone: "America/Los_Angeles",
+      timeZone: config.timezone,
       hour: "2-digit",
       minute: "2-digit",
       hour12: false,

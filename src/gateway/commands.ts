@@ -53,8 +53,7 @@ export async function handleCommand(
     case "/reload":
       return { handled: true, response: "System prompt will reload on next message." };
 
-    case "/quiet":
-      return { handled: true, response: `quiet toggle received (phone: ${phone})` };
+    // /quiet is handled in daemon.ts before reaching here
 
     case "/cron":
       return { handled: true, response: await cronCommand(args) };
@@ -107,13 +106,13 @@ async function sessionsCommand(phone: string): Promise<string> {
   const lines = ["--- Session Pool ---"];
   for (const [type, entry] of Object.entries(entries)) {
     const created = new Date(entry.createdAt).toLocaleTimeString("en-US", {
-      timeZone: "America/Los_Angeles",
+      timeZone: config.timezone,
       hour: "2-digit",
       minute: "2-digit",
       hour12: false,
     });
     const lastActive = new Date(entry.lastActiveAt).toLocaleTimeString("en-US", {
-      timeZone: "America/Los_Angeles",
+      timeZone: config.timezone,
       hour: "2-digit",
       minute: "2-digit",
       hour12: false,

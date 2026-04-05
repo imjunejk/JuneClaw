@@ -25,7 +25,7 @@ function formatDate(date: Date): string {
 
 function formatTimePT(date: Date): string {
   return date.toLocaleString("en-US", {
-    timeZone: "America/Los_Angeles",
+    timeZone: config.timezone,
     weekday: "long",
     year: "numeric",
     month: "long",
@@ -62,15 +62,14 @@ async function fetchRecentMessages(): Promise<string | null> {
       "--limit",
       "10",
       "--json",
-    ]);
+    ], { timeout: 15_000 });
 
     if (!stdout || !stdout.trim()) return null;
 
-    const messages: ImsgHistoryMessage[] = stdout
-      .trim()
-      .split("\n")
-      .filter(Boolean)
-      .map((line: string) => JSON.parse(line));
+    const messages: ImsgHistoryMessage[] = [];
+    for (const line of stdout.trim().split("\n").filter(Boolean)) {
+      try { messages.push(JSON.parse(line)); } catch { /* skip malformed */ }
+    }
 
     if (messages.length === 0) return null;
 
@@ -80,7 +79,7 @@ async function fetchRecentMessages(): Promise<string | null> {
       .filter((m) => m.text)
       .map((m) => {
         const time = new Date(m.created_at).toLocaleTimeString("en-US", {
-          timeZone: "America/Los_Angeles",
+          timeZone: config.timezone,
           hour: "2-digit",
           minute: "2-digit",
           hour12: false,
