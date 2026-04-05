@@ -6,6 +6,7 @@ const home = homedir();
 export type TaskType = "coding" | "research" | "general" | "quick";
 
 export const config = {
+  timezone: "America/Los_Angeles",
   projectDir: process.env.JUNECLAW_PROJECT_DIR ?? join(home, "projects", "juneclaw"),
   workspace: process.env.JUNECLAW_WORKSPACE ?? join(home, "openclaw"),
   channels: {

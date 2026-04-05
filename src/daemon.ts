@@ -32,6 +32,7 @@ import {
   executeRotation,
   resetRotationState,
   getMessageCount,
+  pruneStaleStates,
 } from "./agent/context-rotation.js";
 import {
   runLessonsLoop,
@@ -245,11 +246,11 @@ async function releasePidLock(): Promise<void> {
 }
 
 async function saveState(): Promise<void> {
-  await mkdir(dirname(config.paths.statePath), { recursive: true });
+  await mkdir(dirname(config.paths.statePath), { recursive: true, mode: 0o700 });
   await writeFile(
     config.paths.statePath,
     JSON.stringify(state, null, 2),
-    "utf-8",
+    { encoding: "utf-8", mode: 0o600 },
   );
 }
 
@@ -258,7 +259,7 @@ function isQuietHour(ch: ChannelConfig): boolean {
   const now = new Date();
   const hour = Number(
     now.toLocaleString("en-US", {
-      timeZone: "America/Los_Angeles",
+      timeZone: config.timezone,
       hour: "numeric",
       hour12: false,
     }),
@@ -500,6 +501,8 @@ async function runHeartbeat(
     if (archiveResult && !archiveResult.includes("Archived 0")) {
       log(`[heartbeat] ${archiveResult}`);
     }
+    const pruned = pruneStaleStates();
+    if (pruned > 0) log(`[heartbeat] pruned ${pruned} stale rotation states`);
 
     const systemPrompt = await buildSystemPrompt("heartbeat", name);
     const sessionId = await getSessionId(phone, "general");
@@ -610,7 +613,10 @@ export async function startDaemon(): Promise<void> {
     log(`[startup] failed to send restart notification: ${err instanceof Error ? err.message : String(err)}`);
   });
 
+  let shuttingDown = false;
   const shutdown = async (signal: string) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     log(`Received ${signal}, shutting down...`);
     await emit("daemon:shutdown", { signal });
     stopProgressMonitor();
@@ -674,10 +680,15 @@ export async function startDaemon(): Promise<void> {
           continue;
         }
 
-        // Heavy lane: queue if already processing
+        // Heavy lane: queue if already processing (max 10)
         if (processing) {
-          pendingMessages.push({ text: msg.text, taskType });
-          log(`[pending] queued (${taskType}): ${msg.text.slice(0, 60)}...`);
+          if (pendingMessages.length >= 10) {
+            log(`[pending] queue full — dropping: ${msg.text.slice(0, 40)}...`);
+            await channel.sendMessage("처리 대기열이 가득 찼습니다. 잠시 후 다시 보내주세요.");
+          } else {
+            pendingMessages.push({ text: msg.text, taskType });
+            log(`[pending] queued (${taskType}): ${msg.text.slice(0, 60)}...`);
+          }
           continue;
         }
 

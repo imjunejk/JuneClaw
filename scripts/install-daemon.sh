@@ -11,6 +11,11 @@ TEMPLATE="$PROJECT_DIR/launchd/$PLIST_NAME.plist.template"
 
 echo "==> JuneClaw daemon installer"
 
+if [ ! -f "$TEMPLATE" ]; then
+  echo "  ERROR: plist template not found: $TEMPLATE"
+  exit 1
+fi
+
 # 1. Build
 echo "  Building TypeScript..."
 cd "$PROJECT_DIR"

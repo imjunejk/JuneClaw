@@ -139,10 +139,19 @@ export async function runClaude(opts: {
 
   const attempt = async (): Promise<RunResult> => {
     const raw = await spawnClaude(args, opts.prompt);
-    const parsed = JSON.parse(raw.trim()) as ClaudeJsonOutput;
+    let parsed: ClaudeJsonOutput;
+    try {
+      parsed = JSON.parse(raw.trim());
+    } catch {
+      throw new Error(`Claude returned non-JSON output: ${raw.slice(0, 200)}`);
+    }
+
+    if (!parsed || typeof parsed !== "object") {
+      throw new Error(`Claude returned unexpected output type: ${typeof parsed}`);
+    }
 
     if (parsed.is_error) {
-      throw new Error(`Claude returned error: ${parsed.result}`);
+      throw new Error(`Claude returned error: ${parsed.result ?? "(no message)"}`);
     }
 
     // Extract usage info from modelUsage (has contextWindow) or fallback to usage
@@ -189,8 +198,8 @@ export async function runClaude(opts: {
     }
 
     return {
-      response: parsed.result,
-      sessionId: parsed.session_id,
+      response: parsed.result ?? "",
+      sessionId: parsed.session_id || undefined,
       usage,
     };
   };

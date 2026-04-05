@@ -78,11 +78,14 @@ export function createIMessageChannel(
         "--json",
       ], IMSG_TIMEOUT_MS);
 
-      const messages: ImsgMessage[] = stdout
-        .trim()
-        .split("\n")
-        .filter(Boolean)
-        .map((line: string) => JSON.parse(line));
+      const messages: ImsgMessage[] = [];
+      for (const line of stdout.trim().split("\n").filter(Boolean)) {
+        try {
+          messages.push(JSON.parse(line));
+        } catch {
+          // Skip malformed JSON lines from imsg
+        }
+      }
 
       const newMessages = messages
         .filter((m) => m.id > lastSeenId! && !m.is_from_me && m.text)

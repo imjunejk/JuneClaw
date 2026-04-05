@@ -1,4 +1,5 @@
 import cron from "node-cron";
+import { config } from "../config.js";
 
 export interface CronJob {
   name: string;
@@ -70,7 +71,7 @@ export function addJob(
           }
         });
     },
-    { timezone: "America/Los_Angeles" },
+    { timezone: config.timezone },
   );
 
   jobs.set(name, { name, schedule, task, running: true });
