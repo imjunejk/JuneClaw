@@ -1,0 +1,119 @@
+#!/bin/bash
+# progress-monitor.sh — Independent progress notification script
+# Polls progress-state.json and sends iMessage updates via imsg CLI.
+# No agent spawning — pure shell script.
+#
+# Usage: ./tools/progress-monitor.sh [--once]
+#   --once: check once and exit (for cron/launchd)
+#   default: loop with 5s polling interval
+
+set -euo pipefail
+
+STATE_FILE="$HOME/.juneclaw/progress-state.json"
+PHONE="+12139992143"
+FIRST_DELAY=15       # seconds before first notification
+INTERVAL=45          # seconds between subsequent notifications
+POLL_INTERVAL=5      # polling frequency
+
+last_notified=0
+
+send_progress() {
+  local agent_name="$1"
+  local elapsed_sec="$2"
+  local preview="$3"
+  local task_type="$4"
+
+  local elapsed_min=$(( elapsed_sec / 60 ))
+  local elapsed_remainder=$(( elapsed_sec % 60 ))
+
+  local time_str
+  if [ "$elapsed_min" -ge 1 ]; then
+    time_str="${elapsed_min}분 ${elapsed_remainder}초 경과"
+  else
+    time_str="${elapsed_sec}초 경과"
+  fi
+
+  # Task type emoji
+  local emoji
+  case "$task_type" in
+    coding)   emoji="🔨" ;;
+    research) emoji="🔍" ;;
+    general)  emoji="💬" ;;
+    *)        emoji="⏳" ;;
+  esac
+
+  local msg="${emoji} ${task_type} 작업 진행 중... (${agent_name}, ${time_str})"
+
+  # Add message preview
+  if [ -n "$preview" ]; then
+    msg="${msg}
+  └ \"${preview}\""
+  fi
+
+  # Check for active sub-agents via agent-lifecycle
+  local lifecycle_script="$HOME/openclaw/tools/agent-lifecycle.sh"
+  if [ -x "$lifecycle_script" ]; then
+    local agents
+    agents=$("$lifecycle_script" status 2>/dev/null | grep -c "running" || true)
+    if [ "$agents" -gt 0 ]; then
+      msg="${msg}
+  └ 활성 에이전트: ${agents}개"
+    fi
+  fi
+
+  imsg send --to "$PHONE" --text "$msg" 2>/dev/null && \
+    echo "[progress-monitor] sent: $msg" || \
+    echo "[progress-monitor] send failed"
+}
+
+check_once() {
+  if [ ! -f "$STATE_FILE" ]; then
+    return 0
+  fi
+
+  local started_at agent_name task_type preview
+  started_at=$(python3 -c "import json; print(json.load(open('$STATE_FILE'))['startedAt'])" 2>/dev/null) || return 0
+  agent_name=$(python3 -c "import json; print(json.load(open('$STATE_FILE'))['agentName'])" 2>/dev/null) || return 0
+  task_type=$(python3 -c "import json; print(json.load(open('$STATE_FILE'))['taskType'])" 2>/dev/null) || return 0
+  preview=$(python3 -c "import json; print(json.load(open('$STATE_FILE'))['messagePreview'])" 2>/dev/null) || return 0
+
+  local now_ms
+  now_ms=$(python3 -c "import time; print(int(time.time() * 1000))")
+  local elapsed_ms=$(( now_ms - started_at ))
+  local elapsed_sec=$(( elapsed_ms / 1000 ))
+
+  # Not yet time for first notification
+  if [ "$elapsed_sec" -lt "$FIRST_DELAY" ]; then
+    return 0
+  fi
+
+  # Check if we should send (first time or interval passed)
+  local now_sec
+  now_sec=$(date +%s)
+  if [ "$last_notified" -eq 0 ]; then
+    send_progress "$agent_name" "$elapsed_sec" "$preview" "$task_type"
+    last_notified=$now_sec
+  elif [ $(( now_sec - last_notified )) -ge "$INTERVAL" ]; then
+    send_progress "$agent_name" "$elapsed_sec" "$preview" "$task_type"
+    last_notified=$now_sec
+  fi
+}
+
+# --once mode: single check for cron/launchd
+if [ "${1:-}" = "--once" ]; then
+  check_once
+  exit 0
+fi
+
+# Loop mode: continuous polling
+echo "[progress-monitor] started (poll=${POLL_INTERVAL}s, first=${FIRST_DELAY}s, interval=${INTERVAL}s)"
+while true; do
+  check_once
+
+  # Reset notification state when state file disappears (task completed)
+  if [ ! -f "$STATE_FILE" ] && [ "$last_notified" -ne 0 ]; then
+    last_notified=0
+  fi
+
+  sleep "$POLL_INTERVAL"
+done
