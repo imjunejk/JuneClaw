@@ -2,13 +2,14 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 const home = homedir();
+const workspace = process.env.JUNECLAW_WORKSPACE ?? join(home, ".juneclaw", "workspace");
 
 export type TaskType = "coding" | "research" | "general" | "quick";
 
 export const config = {
   timezone: "America/Los_Angeles",
   projectDir: process.env.JUNECLAW_PROJECT_DIR ?? join(home, "projects", "juneclaw"),
-  workspace: process.env.JUNECLAW_WORKSPACE ?? join(home, ".juneclaw", "workspace"),
+  workspace,
   channels: {
     june: {
       phone: process.env.JUNECLAW_JUNE_PHONE ?? "+12139992143",
@@ -79,8 +80,8 @@ export const config = {
   subAgents: {
     maxConcurrent: 5,
     maxReviewRounds: 3,
-    strategiesPath: join(home, ".juneclaw", "workspace", "strategies"),
-    toolsPath: join(home, ".juneclaw", "workspace", "tools"),
+    strategiesPath: join(workspace, "strategies"),
+    toolsPath: join(workspace, "tools"),
     /** Strategy files injected per task type. Files not found are silently skipped. */
     strategyMapping: {
       coding: [

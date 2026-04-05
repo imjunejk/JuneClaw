@@ -26,7 +26,7 @@ Environment variables (or defaults):
 
 | Variable | Default | Description |
 |---|---|---|
-| `JUNECLAW_WORKSPACE` | `~/openclaw` | Path to memory workspace (SOUL.md, USER.md, etc.) |
+| `JUNECLAW_WORKSPACE` | `~/.juneclaw/workspace` | Path to memory workspace (SOUL.md, USER.md, etc.) |
 | `JUNECLAW_JUNE_PHONE` | `+12139992143` | Phone number to monitor |
 | `JUNECLAW_MODEL` | (none) | Claude model override |
 
@@ -35,7 +35,7 @@ Environment variables (or defaults):
 The workspace directory should contain personality and memory files:
 
 ```
-~/openclaw/
+~/.juneclaw/workspace/
 ├── SOUL.md              # Persona / identity
 ├── USER.md              # User information
 ├── IDENTITY.md          # Role definition
