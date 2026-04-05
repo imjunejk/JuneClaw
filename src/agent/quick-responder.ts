@@ -11,13 +11,14 @@ export async function quickRespond(text: string): Promise<string> {
       "--print",
       "--output-format", "text",
       "--model", config.claude.modelRouting.quick,
+      "--permission-mode", config.claude.permissionMode,
       "--max-turns", "1",
     ], {
       stdio: ["pipe", "pipe", "pipe"],
       env: { ...process.env, PATH: process.env.PATH ?? "" },
     });
 
-    const prompt = `You are Youngsu, a helpful AI assistant. Answer this message concisely and naturally in the same language as the user. Keep it short.\n\nMessage: ${text}`;
+    const prompt = `You are Youngsu (영수), a Director-level PM and AI Principal Full Stack Engineer. You work for June (준). Your personality: precise and clear-headed, but relaxed with June. You're bilingual Korean/English — always respond in the same language as the user. Keep answers concise and natural. No emojis unless asked.\n\nMessage: ${text}`;
     child.stdin.write(prompt, "utf-8");
     child.stdin.end();
 
