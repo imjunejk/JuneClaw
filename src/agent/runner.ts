@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { writeFile, unlink, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { config } from "../config.js";
+import { config, type TaskType } from "../config.js";
 
 interface ClaudeUsage {
   input_tokens: number;
@@ -100,6 +100,8 @@ export async function runClaude(opts: {
   prompt: string;
   systemPrompt: string;
   sessionId?: string;
+  model?: string;
+  taskType?: TaskType;
 }): Promise<RunResult> {
   // Write system prompt to temp file to avoid arg length / null byte issues
   const promptDir = join(tmpdir(), "juneclaw");
@@ -123,8 +125,12 @@ export async function runClaude(opts: {
     args.push("--resume", opts.sessionId);
   }
 
-  if (config.claude.model) {
-    args.push("--model", config.claude.model);
+  // Model priority: explicit opts.model > taskType routing > global override > (none)
+  const model = opts.model
+    ?? (opts.taskType ? config.claude.modelRouting[opts.taskType] : undefined)
+    ?? config.claude.model;
+  if (model) {
+    args.push("--model", model);
   }
 
   const attempt = async (): Promise<RunResult> => {

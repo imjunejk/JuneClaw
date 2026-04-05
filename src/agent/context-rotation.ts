@@ -1,4 +1,4 @@
-import { config } from "../config.js";
+import { config, type TaskType } from "../config.js";
 import { clearSessionId } from "./session.js";
 import { writeHandoff } from "../memory/handoff.js";
 import { appendDailyLog, appendSystemLog } from "../memory/writer.js";
@@ -165,6 +165,7 @@ export function resetRotationState(phone: string): void {
 export async function executeRotation(
   phone: string,
   reason: RotationReason,
+  taskType?: TaskType,
 ): Promise<void> {
   const s = getState(phone);
 
@@ -177,10 +178,10 @@ export async function executeRotation(
     progress: `Messages: ${s.messageCount}, Errors: ${s.consecutiveErrors}, Peak usage: ${s.peakUsagePercent.toFixed(1)}%, Cumulative tokens: ${s.cumulativeTokens.toLocaleString()}. ${usageSummary}`,
   });
 
-  await clearSessionId(phone);
+  await clearSessionId(phone, taskType);
 
   await appendSystemLog(
-    `Context rotation for ${phone}: ${reason} (msgs=${s.messageCount}, errs=${s.consecutiveErrors}, peak=${s.peakUsagePercent.toFixed(1)}%, tokens=${s.cumulativeTokens})`,
+    `Context rotation for ${phone}${taskType ? ` (${taskType})` : ""}: ${reason} (msgs=${s.messageCount}, errs=${s.consecutiveErrors}, peak=${s.peakUsagePercent.toFixed(1)}%, tokens=${s.cumulativeTokens})`,
   );
 
   await appendDailyLog(
