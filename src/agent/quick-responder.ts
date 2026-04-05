@@ -12,7 +12,12 @@ export async function quickRespond(text: string): Promise<string> {
       "--output-format", "text",
       "--model", config.claude.modelRouting.quick,
       "--permission-mode", config.claude.permissionMode,
-      "--max-turns", "1",
+      // Previously 1 — but Sonnet's extended thinking pass counts as a turn,
+      // so a response that required any reasoning step exited with
+      // "Reached max turns (1)" (written to stdout, which is why prior error
+      // logs showed empty stderr). 3 leaves headroom without allowing
+      // multi-step tool chains (this call doesn't pass --allowedTools).
+      "--max-turns", "3",
     ], {
       stdio: ["pipe", "pipe", "pipe"],
       env: { ...process.env, PATH: process.env.PATH ?? "" },
@@ -29,13 +34,26 @@ export async function quickRespond(text: string): Promise<string> {
 
     const timer = setTimeout(() => {
       child.kill("SIGTERM");
+      // Escalate to SIGKILL if the child ignores SIGTERM so the next
+      // invocation isn't racing a zombie (mirrors runner.ts behavior).
+      setTimeout(() => {
+        try { child.kill("SIGKILL"); } catch { /* already dead */ }
+      }, 5_000);
       reject(new Error("QUICK_TIMEOUT"));
     }, 30_000);
 
     child.on("close", (code) => {
       clearTimeout(timer);
       if (code !== 0) {
-        reject(new Error(`quick-respond exited ${code}: ${stderr.slice(0, 200)}`));
+        // Include BOTH stdout and stderr in the error — claude CLI sometimes
+        // writes error messages to stdout, and empty stderr was masking the
+        // actual failure reason in production logs.
+        const errDetail = [
+          `code=${code}`,
+          stderr.trim() ? `stderr=${stderr.slice(0, 800).trim()}` : null,
+          stdout.trim() ? `stdout=${stdout.slice(0, 800).trim()}` : null,
+        ].filter(Boolean).join(" | ");
+        reject(new Error(`quick-respond failed: ${errDetail || "(no output)"}`));
       } else {
         resolve(stdout.trim());
       }
