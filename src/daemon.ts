@@ -72,7 +72,7 @@ let processing = false;
 const btwQueue: string[] = [];
 const pendingMessages: { text: string; taskType: TaskType }[] = [];
 let monitorProcess: ChildProcess | null = null;
-import { writeFile as fsWriteFile, unlink as fsUnlink, mkdir as fsMkdir } from "node:fs/promises";
+let monitorStopped = false;
 
 interface ProgressState {
   startedAt: number;
@@ -93,8 +93,8 @@ async function writeProgressState(taskType: TaskType, text: string, phone: strin
     phone,
   };
   try {
-    await fsMkdir(dirname(config.progress.statePath), { recursive: true });
-    await fsWriteFile(config.progress.statePath, JSON.stringify(state, null, 2), "utf-8");
+    await mkdir(dirname(config.progress.statePath), { recursive: true });
+    await writeFile(config.progress.statePath, JSON.stringify(state, null, 2), "utf-8");
     log(`[progress] state written: ${state.agentName} (${taskType})`);
   } catch (err) {
     log(`[progress] failed to write state: ${err instanceof Error ? err.message : String(err)}`);
@@ -103,7 +103,7 @@ async function writeProgressState(taskType: TaskType, text: string, phone: strin
 
 async function clearProgressState(): Promise<void> {
   try {
-    await fsUnlink(config.progress.statePath);
+    await unlink(config.progress.statePath);
     log("[progress] state cleared");
   } catch {
     // file may not exist
@@ -111,6 +111,7 @@ async function clearProgressState(): Promise<void> {
 }
 
 function startProgressMonitor(): void {
+  monitorStopped = false;
   const scriptPath = join(dirname(new URL(import.meta.url).pathname), "..", "tools", "progress-monitor.sh");
   monitorProcess = spawn("bash", [scriptPath], {
     stdio: ["ignore", "pipe", "pipe"],
@@ -130,12 +131,23 @@ function startProgressMonitor(): void {
   monitorProcess.on("exit", (code) => {
     log(`[monitor] exited with code ${code}`);
     monitorProcess = null;
+    // Respawn the monitor after a brief delay so progress notifications
+    // aren't permanently lost if the monitor crashes.
+    if (!monitorStopped) {
+      setTimeout(() => {
+        if (!monitorStopped && monitorProcess === null) {
+          log("[monitor] respawning after crash...");
+          startProgressMonitor();
+        }
+      }, 5000);
+    }
   });
 
   log(`[monitor] started (PID ${monitorProcess.pid})`);
 }
 
 function stopProgressMonitor(): void {
+  monitorStopped = true;
   if (monitorProcess) {
     monitorProcess.kill("SIGTERM");
     monitorProcess = null;

@@ -7,10 +7,9 @@
 #   --once: check once and exit (for cron/launchd)
 #   default: loop with 5s polling interval
 
-set -euo pipefail
+set -uo pipefail
 
 STATE_FILE="$HOME/.juneclaw/progress-state.json"
-PHONE="+12139992143"
 FIRST_DELAY=15       # seconds before first notification
 INTERVAL=45          # seconds between subsequent notifications
 POLL_INTERVAL=5      # polling frequency
@@ -71,11 +70,16 @@ check_once() {
     return 0
   fi
 
-  local started_at agent_name task_type preview
-  started_at=$(python3 -c "import json; print(json.load(open('$STATE_FILE'))['startedAt'])" 2>/dev/null) || return 0
-  agent_name=$(python3 -c "import json; print(json.load(open('$STATE_FILE'))['agentName'])" 2>/dev/null) || return 0
-  task_type=$(python3 -c "import json; print(json.load(open('$STATE_FILE'))['taskType'])" 2>/dev/null) || return 0
-  preview=$(python3 -c "import json; print(json.load(open('$STATE_FILE'))['messagePreview'])" 2>/dev/null) || return 0
+  local started_at agent_name task_type preview PHONE
+  eval $(python3 -c "
+import json
+s = json.load(open('$STATE_FILE'))
+print(f\"started_at={s['startedAt']}\")
+print(f\"agent_name={s['agentName']}\")
+print(f\"task_type={s['taskType']}\")
+print(f\"preview={s['messagePreview']}\")
+print(f\"PHONE={s.get('phone', '')}\")
+" 2>/dev/null) || return 0
 
   local now_ms
   now_ms=$(python3 -c "import time; print(int(time.time() * 1000))")
