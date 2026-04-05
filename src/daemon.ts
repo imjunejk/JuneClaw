@@ -54,6 +54,7 @@ interface DaemonState {
   pid: number;
   startedAt: string;
   lastHeartbeatAt: string | null;
+  lastLoopAt: string | null;
   channels: Record<string, { sessionId: string | null; quiet: boolean }>;
 }
 
@@ -61,6 +62,7 @@ const state: DaemonState = {
   pid: process.pid,
   startedAt: new Date().toISOString(),
   lastHeartbeatAt: null,
+  lastLoopAt: null,
   channels: {},
 };
 
@@ -107,6 +109,23 @@ async function clearProgressState(): Promise<void> {
     log("[progress] state cleared");
   } catch {
     // file may not exist
+  }
+}
+
+/**
+ * Wrap a long-running async task with a liveness heartbeat.
+ * Updates state.lastLoopAt every 30s so the watchdog doesn't falsely detect a hang
+ * while Claude CLI is legitimately running (which can take up to 10-20 minutes).
+ */
+async function withProcessingLiveness<T>(fn: () => Promise<T>): Promise<T> {
+  const interval = setInterval(() => {
+    state.lastLoopAt = new Date().toISOString();
+    saveState().catch(() => {});
+  }, 30_000);
+  try {
+    return await fn();
+  } finally {
+    clearInterval(interval);
   }
 }
 
@@ -614,6 +633,10 @@ export async function startDaemon(): Promise<void> {
 
   // Main poll loop
   while (true) {
+    // Update liveness timestamp every loop iteration (independent of heartbeat)
+    state.lastLoopAt = new Date().toISOString();
+    saveState().catch(() => {});
+
     try {
       const messages = await channel.pollNewMessages();
 
@@ -661,7 +684,7 @@ export async function startDaemon(): Promise<void> {
         try {
           processing = true;
           await writeProgressState(taskType, msg.text, ch.phone);
-          await processMessage(channel, ch, msg.text, taskType);
+          await withProcessingLiveness(() => processMessage(channel, ch, msg.text, taskType));
         } catch (err) {
           logError("Failed to process message", err);
           await channel.sendMessage("처리 중 오류가 발생했습니다.");
@@ -680,7 +703,7 @@ export async function startDaemon(): Promise<void> {
           try {
             processing = true;
             await writeProgressState("general", followUp, ch.phone);
-            await processMessage(channel, ch, followUp, "general");
+            await withProcessingLiveness(() => processMessage(channel, ch, followUp, "general"));
           } catch (err) {
             logError("Failed to process /btw follow-up", err);
           } finally {
@@ -703,7 +726,7 @@ export async function startDaemon(): Promise<void> {
         try {
           processing = true;
           await writeProgressState(pending.taskType, pending.text, ch.phone);
-          await processMessage(channel, ch, pending.text, pending.taskType);
+          await withProcessingLiveness(() => processMessage(channel, ch, pending.text, pending.taskType));
         } catch (err) {
           logError("Failed to process pending message", err);
           await channel.sendMessage("처리 중 오류가 발생했습니다.");

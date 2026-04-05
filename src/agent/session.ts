@@ -17,7 +17,26 @@ interface SessionStore {
 async function loadStore(): Promise<SessionStore> {
   try {
     const data = await readFile(config.paths.sessions, "utf-8");
-    return JSON.parse(data) as SessionStore;
+    const raw = JSON.parse(data) as Record<string, unknown>;
+
+    // Migrate legacy format: {phone: "sessionId"} → {phone: {general: {...}}}
+    const store: SessionStore = {};
+    for (const [phone, value] of Object.entries(raw)) {
+      if (typeof value === "string") {
+        store[phone] = {
+          general: {
+            sessionId: value,
+            model: config.claude.modelRouting?.general ?? "default",
+            createdAt: new Date().toISOString(),
+            lastActiveAt: new Date().toISOString(),
+            messageCount: 0,
+          },
+        };
+      } else if (value && typeof value === "object") {
+        store[phone] = value as Partial<Record<TaskType, SessionEntry>>;
+      }
+    }
+    return store;
   } catch {
     return {};
   }
