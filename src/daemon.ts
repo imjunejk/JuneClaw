@@ -75,10 +75,20 @@ let progressInterval: ReturnType<typeof setInterval> | null = null;
 function startProgressUpdates(channel: Channel): void {
   const startedAt = Date.now();
   progressTimer = setTimeout(() => {
-    channel.sendMessage("작업 진행 중...").catch(() => {});
+    log("[progress] sending initial progress message");
+    channel.sendMessage("작업 진행 중...").then(() => {
+      log("[progress] sent: 작업 진행 중...");
+    }).catch((err) => {
+      log(`[progress] send failed: ${err instanceof Error ? err.message : String(err)}`);
+    });
     progressInterval = setInterval(() => {
       const mins = Math.round((Date.now() - startedAt) / 60_000);
-      channel.sendMessage(`작업 진행 중... (${mins}분 경과)`).catch(() => {});
+      const msg = `작업 진행 중... (${mins}분 경과)`;
+      channel.sendMessage(msg).then(() => {
+        log(`[progress] sent: ${msg}`);
+      }).catch((err) => {
+        log(`[progress] send failed: ${err instanceof Error ? err.message : String(err)}`);
+      });
     }, config.progress.intervalMs);
   }, config.progress.firstDelayMs);
 }
