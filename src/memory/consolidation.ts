@@ -1,4 +1,4 @@
-import { readFile, readdir, writeFile, appendFile, unlink, mkdir } from "node:fs/promises";
+import { readFile, readdir, writeFile, unlink, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { config } from "../config.js";
 import { runClaude } from "../agent/runner.js";
@@ -8,7 +8,6 @@ const memoryDir = join(config.workspace, "memory");
 const dailyDir = join(memoryDir, "daily");
 const weeklyDir = join(memoryDir, "weekly");
 const monthlyDir = join(memoryDir, "monthly");
-const lessonsDir = join(memoryDir, "lessons");
 
 async function loadFileOrNull(path: string): Promise<string | null> {
   try {
@@ -34,61 +33,7 @@ function getISOWeek(date: Date): string {
   return `${d.getFullYear()}-W${String(weekNum).padStart(2, "0")}`;
 }
 
-export async function runLessonsLoop(): Promise<void> {
-  const today = new Date().toISOString().split("T")[0]!;
-  const dailyPath = join(dailyDir, `${today}.md`);
-  const dailyContent = await loadFileOrNull(dailyPath);
-
-  if (!dailyContent || dailyContent.trim().length < 50) {
-    return; // Nothing meaningful to extract lessons from
-  }
-
-  // Extract lessons
-  const lessonsPrompt = `You are reviewing today's daily log to extract lessons learned.
-Read the daily log and produce a structured lessons file:
-
-# Daily Lessons - ${today}
-## Problems Encountered
-## Root Causes
-## Solutions Applied
-## Preventative Rules (new rules to prevent recurrence)
-
-If there were no notable problems/lessons today, write a brief "No significant issues" note.
-Keep it concise — focus on actionable patterns, not conversation summaries.`;
-
-  const lessonsResult = await runClaude({
-    prompt: dailyContent,
-    systemPrompt: lessonsPrompt,
-  });
-
-  await mkdir(lessonsDir, { recursive: true });
-  const lessonsPath = join(lessonsDir, `${today}-lessons.md`);
-  await writeFile(lessonsPath, lessonsResult.response, "utf-8");
-
-  // Update master-rules
-  const masterRulesPath = join(lessonsDir, "master-rules.md");
-  const masterRules = (await loadFileOrNull(masterRulesPath)) ?? "";
-
-  const rulesPrompt = `You are updating master-rules.md with new preventative rules from today's lessons.
-If any new preventative rules should be added:
-- Check if a similar rule already exists; if so, do NOT duplicate
-- Add new rules in format: "RULE-XXX: [trigger] → [instruction]. Reason: [why]"
-- Respond with ONLY the new rules to append (one per line), or exactly "NO_NEW_RULES" if none needed.`;
-
-  const rulesResult = await runClaude({
-    prompt: `Current master-rules:\n${masterRules.slice(-5000)}\n\nToday's lessons:\n${lessonsResult.response}`,
-    systemPrompt: rulesPrompt,
-  });
-
-  if (
-    !rulesResult.response.includes("NO_NEW_RULES") &&
-    rulesResult.response.trim().length > 0
-  ) {
-    await appendFile(masterRulesPath, `\n${rulesResult.response.trim()}\n`, "utf-8");
-  }
-
-  await appendSystemLog(`Lessons loop completed for ${today}`);
-}
+// runLessonsLoop removed — now handled by Claude Code remote trigger (daily 00:00 PDT)
 
 export async function runWeeklyCompression(): Promise<void> {
   await mkdir(weeklyDir, { recursive: true });

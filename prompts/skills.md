@@ -52,7 +52,7 @@ TZ="America/Los_Angeles" date
 curl -s "https://..."
 
 # Memory search
-grep -r "query" ~/openclaw/memory/ --include="*.md" -l
+grep -r "query" ~/.juneclaw/workspace/memory/ --include="*.md" -l
 
 # Git
 git -C ~/projects/repo log --oneline -10
