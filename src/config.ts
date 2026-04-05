@@ -72,6 +72,25 @@ export const config = {
     maxReviewRounds: 3,
     strategiesPath: join(home, "openclaw", "strategies"),
     toolsPath: join(home, "openclaw", "tools"),
+    /** Strategy files injected per task type. Files not found are silently skipped. */
+    strategyMapping: {
+      coding: [
+        { file: "dev-team-common.md", label: "DEV-TEAM (Common)", maxChars: 5000 },
+        { file: "dev-team-youngsik.md", label: "DEV-TEAM (Youngsik — FE)", maxChars: 3000 },
+        { file: "dev-team-youngchul.md", label: "DEV-TEAM (Youngchul — BE)", maxChars: 3000 },
+      ],
+      research: [
+        { file: "dev-team-common.md", label: "DEV-TEAM (Common)", maxChars: 5000 },
+        { file: "dev-team-kwangsoo.md", label: "DEV-TEAM (Kwangsoo — Strategy)", maxChars: 3000 },
+        { file: "dev-team-sangchul.md", label: "DEV-TEAM (Sangchul — Marketing)", maxChars: 3000 },
+      ],
+      general: [
+        { file: "dev-team-youngsu.md", label: "DEV-TEAM (Youngsu — PM)", maxChars: 8000 },
+        { file: "dev-team-common.md", label: "DEV-TEAM (Common)", maxChars: 5000 },
+        { file: "dev-team-process.md", label: "DEV-TEAM (Process)", maxChars: 5000 },
+      ],
+      quick: [],
+    } satisfies Record<TaskType, { file: string; label: string; maxChars: number }[]>,
   },
   contextRotation: {
     maxConsecutiveErrors: 10,

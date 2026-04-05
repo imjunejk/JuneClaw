@@ -285,8 +285,8 @@ async function processMessage(
     log(`[session-pool] expired sessions cleaned: ${cleaned.join(", ")}`);
   }
 
-  // Build system prompt with cross-session context
-  let systemPrompt = await buildSystemPrompt("imessage", name);
+  // Build system prompt with task-specific strategy injection
+  let systemPrompt = await buildSystemPrompt("imessage", name, taskType);
   const recentCtx = getRecentContext();
   const sharedCtx = await getSharedContext();
   if (recentCtx) systemPrompt += "\n\n" + recentCtx;
