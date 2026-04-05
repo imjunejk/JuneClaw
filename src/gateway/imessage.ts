@@ -7,6 +7,29 @@ import type { IncomingMessage, Channel } from "./types.js";
 
 const execFileAsync = promisify(execFile);
 
+/** execFileAsync with a timeout — kills the child if it exceeds `ms`. */
+function execWithTimeout(
+  cmd: string,
+  args: string[],
+  ms: number,
+): Promise<{ stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    const child = execFile(cmd, args, { timeout: ms, maxBuffer: 5 * 1024 * 1024 }, (err, stdout, stderr) => {
+      if (err) {
+        if ((err as any).killed || err.message.includes("ETIMEDOUT")) {
+          reject(new Error(`${cmd} timed out after ${ms}ms`));
+        } else {
+          reject(err);
+        }
+      } else {
+        resolve({ stdout, stderr });
+      }
+    });
+  });
+}
+
+const IMSG_TIMEOUT_MS = 30_000; // 30 seconds
+
 interface ImsgMessage {
   id: number;
   guid: string;
@@ -46,14 +69,14 @@ export function createIMessageChannel(
         lastSeenId = store[String(chatId)] ?? 0;
       }
 
-      const { stdout } = await execFileAsync("imsg", [
+      const { stdout } = await execWithTimeout("imsg", [
         "history",
         "--chat-id",
         String(chatId),
         "--limit",
         "20",
         "--json",
-      ]);
+      ], IMSG_TIMEOUT_MS);
 
       const messages: ImsgMessage[] = stdout
         .trim()
@@ -92,7 +115,7 @@ export function createIMessageChannel(
       }
 
       for (const chunk of chunks) {
-        await execFileAsync("imsg", ["send", "--to", phone, "--text", chunk]);
+        await execWithTimeout("imsg", ["send", "--to", phone, "--text", chunk], IMSG_TIMEOUT_MS);
       }
     },
   };
