@@ -3,7 +3,10 @@ import { join } from "node:path";
 
 const home = homedir();
 
+export type TaskType = "coding" | "research" | "general" | "quick";
+
 export const config = {
+  projectDir: process.env.JUNECLAW_PROJECT_DIR ?? join(home, "projects", "juneclaw"),
   workspace: process.env.JUNECLAW_WORKSPACE ?? join(home, "openclaw"),
   channels: {
     june: {
@@ -30,6 +33,13 @@ export const config = {
     ],
     timeoutMs: 600_000,
     model: process.env.JUNECLAW_MODEL,
+    modelRouting: {
+      coding: process.env.JUNECLAW_CODING_MODEL ?? "claude-opus-4-6",
+      research: process.env.JUNECLAW_RESEARCH_MODEL ?? "claude-opus-4-6",
+      general: process.env.JUNECLAW_GENERAL_MODEL ?? "claude-sonnet-4-6",
+      quick: process.env.JUNECLAW_QUICK_MODEL ?? "claude-sonnet-4-6",
+      classifier: process.env.JUNECLAW_CLASSIFIER_MODEL ?? "claude-sonnet-4-6",
+    } satisfies Record<TaskType | "classifier", string>,
   },
   poll: {
     intervalMs: 2000,
@@ -39,8 +49,18 @@ export const config = {
     firstDelayMs: 15_000,
     intervalMs: 45_000,
   },
+  sessionPool: {
+    idleTimeouts: {
+      coding: 10 * 60_000,
+      research: 20 * 60_000,
+      general: 5 * 60_000,
+      quick: 0,
+    } satisfies Record<TaskType, number>,
+    maxSessionAge: 30 * 60_000,
+  },
   paths: {
     sessions: join(home, ".juneclaw", "sessions.json"),
+    sharedContext: join(home, ".juneclaw", "shared-context.md"),
     lastSeen: join(home, ".juneclaw", "last-seen.json"),
     logs: join(home, ".juneclaw", "logs"),
     statePath: join(home, ".juneclaw", "state.json"),
@@ -61,6 +81,10 @@ export const config = {
     tokenWarningPercent: 60,
     tokenHandoffPercent: 78,
     tokenForceRotatePercent: 90,
+  },
+  contextBridge: {
+    maxRecentExchanges: 5,
+    maxSharedContextLines: 20,
   },
   cron: {
     schedules: {

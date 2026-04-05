@@ -4,11 +4,14 @@ import { promisify } from "node:util";
 import { dirname } from "node:path";
 
 const execFileAsync = promisify(execFile);
-import { config, type ChannelConfig } from "./config.js";
+import { config, type ChannelConfig, type TaskType } from "./config.js";
 import { createIMessageChannel } from "./gateway/imessage.js";
 import { handleCommand } from "./gateway/commands.js";
 import { runClaude } from "./agent/runner.js";
-import { getSessionId, setSessionId, clearSessionId } from "./agent/session.js";
+import { getSessionId, setSessionId, clearSessionId, cleanupExpiredSessions } from "./agent/session.js";
+import { classifyTask, getModelForTask } from "./agent/classifier.js";
+import { quickRespond } from "./agent/quick-responder.js";
+import { recordExchange, getRecentContext, appendSharedContext, getSharedContext } from "./agent/context-bridge.js";
 import { buildSystemPrompt } from "./memory/loader.js";
 import { appendDailyLog, appendSystemLog } from "./memory/writer.js";
 import { addJob, stopAll as stopAllCron } from "./scheduler/cron.js";
@@ -67,17 +70,27 @@ let quietHoursOverrideUntil: number = 0;
 const processedIds = new Set<number>();
 let processing = false;
 const btwQueue: string[] = [];
-const pendingMessages: string[] = [];
+const pendingMessages: { text: string; taskType: TaskType }[] = [];
 let progressTimer: ReturnType<typeof setTimeout> | null = null;
 let progressInterval: ReturnType<typeof setInterval> | null = null;
 
 function startProgressUpdates(channel: Channel): void {
   const startedAt = Date.now();
   progressTimer = setTimeout(() => {
-    channel.sendMessage("작업 진행 중...").catch(() => {});
+    log("[progress] sending initial progress message");
+    channel.sendMessage("작업 진행 중...").then(() => {
+      log("[progress] sent: 작업 진행 중...");
+    }).catch((err) => {
+      log(`[progress] send failed: ${err instanceof Error ? err.message : String(err)}`);
+    });
     progressInterval = setInterval(() => {
       const mins = Math.round((Date.now() - startedAt) / 60_000);
-      channel.sendMessage(`작업 진행 중... (${mins}분 경과)`).catch(() => {});
+      const msg = `작업 진행 중... (${mins}분 경과)`;
+      channel.sendMessage(msg).then(() => {
+        log(`[progress] sent: ${msg}`);
+      }).catch((err) => {
+        log(`[progress] send failed: ${err instanceof Error ? err.message : String(err)}`);
+      });
     }, config.progress.intervalMs);
   }, config.progress.firstDelayMs);
 }
@@ -183,10 +196,30 @@ function isQuietHour(ch: ChannelConfig): boolean {
   return hour >= start && hour < end;
 }
 
+/** Handle a quick-lane message: non-blocking, no session, fire-and-forget. */
+async function processQuickMessage(
+  channel: Channel,
+  name: string,
+  text: string,
+): Promise<void> {
+  log(`[quick] responding to: ${text.slice(0, 60)}...`);
+  try {
+    const response = await quickRespond(text);
+    log(`[quick] response: ${response.slice(0, 80)}...`);
+    await channel.sendMessage(response);
+    await appendDailyLog(name, text, response);
+    recordExchange(text, response, "quick");
+  } catch (err) {
+    logError("[quick] failed", err);
+    await channel.sendMessage("처리 중 오류가 발생했습니다.");
+  }
+}
+
 async function processMessage(
   channel: Channel,
   channelConfig: ChannelConfig,
   text: string,
+  taskType: TaskType,
 ): Promise<void> {
   const phone = channelConfig.phone;
   const name = channelConfig.name;
@@ -217,6 +250,15 @@ async function processMessage(
     return;
   }
 
+  // Quick lane: fire-and-forget, no session needed
+  if (taskType === "quick") {
+    await processQuickMessage(channel, name, text);
+    return;
+  }
+
+  const model = getModelForTask(taskType);
+  log(`[classify] ${taskType} → ${model}`);
+
   recordMessage(phone);
 
   const msgCount = getMessageCount(phone);
@@ -230,49 +272,72 @@ async function processMessage(
   const preReason = shouldRotate(phone);
   if (preReason && preReason !== "message_count") {
     log(`[context-rotation] triggered before processing: ${preReason}`);
-    await executeRotation(phone, preReason);
+    await executeRotation(phone, preReason, taskType);
     await emit("rotation:triggered", { reason: preReason });
     await channel.sendMessage(
       `Context rotation triggered (${preReason}). Reprocessing your message in a fresh session.`,
     );
-    // Fall through to process the message with the new (empty) session
   }
 
-  const systemPrompt = await buildSystemPrompt("imessage", name);
-  const sessionId = await getSessionId(phone);
+  // Clean up expired sessions for this phone
+  const cleaned = await cleanupExpiredSessions(phone);
+  if (cleaned.length > 0) {
+    log(`[session-pool] expired sessions cleaned: ${cleaned.join(", ")}`);
+  }
+
+  // Build system prompt with cross-session context
+  let systemPrompt = await buildSystemPrompt("imessage", name);
+  const recentCtx = getRecentContext();
+  const sharedCtx = await getSharedContext();
+  if (recentCtx) systemPrompt += "\n\n" + recentCtx;
+  if (sharedCtx) systemPrompt += "\n\n" + sharedCtx;
+
+  // Get session for this specific task type
+  const sessionId = await getSessionId(phone, taskType);
 
   try {
     const result = await runClaude({
       prompt: text,
       systemPrompt,
       sessionId,
+      model,
+      taskType,
     });
 
     recordSuccess(phone);
 
     if (result.usage) {
       recordUsage(phone, result.usage);
-      log(`[usage] ${result.usage.totalTokens.toLocaleString()} tokens (${result.usage.usagePercent.toFixed(1)}% of ${result.usage.contextWindow.toLocaleString()}), $${result.usage.costUSD.toFixed(4)}`);
+      log(`[usage] (${taskType}) ${result.usage.totalTokens.toLocaleString()} tokens (${result.usage.usagePercent.toFixed(1)}% of ${result.usage.contextWindow.toLocaleString()}), $${result.usage.costUSD.toFixed(4)}`);
     }
 
     if (result.sessionId) {
-      await setSessionId(phone, result.sessionId);
+      await setSessionId(phone, result.sessionId, taskType, model);
       state.channels[phone] = {
         sessionId: result.sessionId,
         quiet: quietMode.get(phone) ?? false,
       };
     }
 
-    log(`[response] ${result.response.slice(0, 80)}...`);
+    log(`[response] (${taskType}) ${result.response.slice(0, 80)}...`);
     await channel.sendMessage(result.response);
     await appendDailyLog(name, text, result.response);
     await emit("message:responded", { to: name });
+
+    // Record exchange for cross-session context bridge
+    recordExchange(text, result.response, taskType);
+
+    // Update shared context on significant task completions
+    if (taskType === "coding" || taskType === "research") {
+      const summary = result.response.slice(0, 100).replace(/\n/g, " ");
+      await appendSharedContext(`(${taskType}) ${summary}`);
+    }
 
     // Phase 1: Early warning (60%)
     if (shouldWarnContext(phone) && result.usage) {
       log(`[context] warning: ${result.usage.usagePercent.toFixed(1)}% context used`);
       await channel.sendMessage(
-        `[Context ${result.usage.usagePercent.toFixed(0)}%] 세션이 곧 리셋됩니다.`,
+        `[Context ${result.usage.usagePercent.toFixed(0)}%] ${taskType} 세션이 곧 리셋됩니다.`,
       );
     }
 
@@ -281,7 +346,7 @@ async function processMessage(
       const pct = result.usage?.usagePercent.toFixed(0) ?? "?";
       log(`[handoff] context ${pct}% — requesting smart handoff from Claude`);
       await channel.sendMessage(
-        `[Context ${pct}%] 핸드오프 준비 중...`,
+        `[Context ${pct}%] ${taskType} 세션 핸드오프 준비 중...`,
       );
       try {
         const handoffResult = await writeSmartHandoff(result.sessionId!);
@@ -292,38 +357,36 @@ async function processMessage(
         markHandoffDone(phone);
         log("[handoff] HANDOFF.md written by Claude");
 
-        // Reset session directly — do NOT call executeRotation (it overwrites HANDOFF.md)
-        await clearSessionId(phone);
+        await clearSessionId(phone, taskType);
         await appendSystemLog(
-          `Smart handoff completed for ${phone}: context ${pct}%`,
+          `Smart handoff completed for ${phone} (${taskType}): context ${pct}%`,
         );
         resetRotationState(phone);
         await emit("rotation:triggered", { reason: "smart_handoff" });
         await channel.sendMessage(
-          `핸드오프 완료. 다음 메시지부터 새 세션으로 시작합니다.`,
+          `${taskType} 세션 핸드오프 완료. 다음 메시지부터 새 세션으로 시작합니다.`,
         );
       } catch (err) {
         logError("[handoff] smart handoff failed, falling back to basic", err);
         markHandoffDone(phone);
-        // Write basic handoff + rotate immediately so session doesn't continue degraded
-        await executeRotation(phone, "token_threshold");
+        await executeRotation(phone, "token_threshold", taskType);
         await channel.sendMessage(
-          `핸드오프 실패 — 기본 핸드오프로 세션을 리셋합니다.`,
+          `핸드오프 실패 — 기본 핸드오프로 ${taskType} 세션을 리셋합니다.`,
         );
       }
     }
 
-    // Phase 3: Force rotation (90%) — fallback if handoff didn't trigger or was skipped
+    // Phase 3: Force rotation (90%)
     const postReason = shouldRotate(phone);
     if (postReason) {
       log(`[context-rotation] triggered after processing: ${postReason}`);
-      await executeRotation(phone, postReason);
+      await executeRotation(phone, postReason, taskType);
       await emit("rotation:triggered", { reason: postReason });
       const label = postReason === "token_threshold"
         ? `컨텍스트 ${result.usage?.usagePercent.toFixed(0) ?? "?"}% 도달`
         : `세션 메시지 한도`;
       await channel.sendMessage(
-        `Context rotation (${label}). 다음 메시지부터 새 세션으로 시작합니다.`,
+        `Context rotation (${label}). ${taskType} 세션이 리셋됩니다.`,
       );
     }
   } catch (err) {
@@ -365,14 +428,14 @@ async function runHeartbeat(
     }
 
     const systemPrompt = await buildSystemPrompt("heartbeat", name);
-    const sessionId = await getSessionId(phone);
+    const sessionId = await getSessionId(phone, "general");
 
     const prompt = `HEARTBEAT: Check HEARTBEAT.md and follow it. Current time: ${now.toISOString()}. Reply HEARTBEAT_OK if nothing needs attention, otherwise take action.`;
 
-    const result = await runClaude({ prompt, systemPrompt, sessionId });
+    const result = await runClaude({ prompt, systemPrompt, sessionId, taskType: "general" });
 
     if (result.sessionId) {
-      await setSessionId(phone, result.sessionId);
+      await setSessionId(phone, result.sessionId, "general");
     }
 
     state.lastHeartbeatAt = now.toISOString();
@@ -500,22 +563,38 @@ export async function startDaemon(): Promise<void> {
           continue;
         }
 
-        // Queue normal messages while processing
-        if (processing) {
-          pendingMessages.push(msg.text);
-          log(`[pending] queued message while processing: ${msg.text.slice(0, 60)}...`);
-          continue;
-        }
-
         log(`[incoming] ${msg.sender}: ${msg.text.slice(0, 80)}...`);
 
         // User message → override quiet hours for 1 hour
         quietHoursOverrideUntil = Date.now() + 60 * 60 * 1000;
 
+        // Classify the task (Sonnet CLI native, ~1-2s)
+        let taskType: TaskType;
+        try {
+          taskType = await classifyTask(msg.text);
+        } catch {
+          taskType = "general";
+        }
+
+        // Quick lane: process immediately even if heavy work is ongoing
+        if (taskType === "quick") {
+          processQuickMessage(channel, ch.name, msg.text).catch((err) => {
+            logError("[quick] fire-and-forget failed", err);
+          });
+          continue;
+        }
+
+        // Heavy lane: queue if already processing
+        if (processing) {
+          pendingMessages.push({ text: msg.text, taskType });
+          log(`[pending] queued (${taskType}): ${msg.text.slice(0, 60)}...`);
+          continue;
+        }
+
         try {
           processing = true;
           startProgressUpdates(channel);
-          await processMessage(channel, ch, msg.text);
+          await processMessage(channel, ch, msg.text, taskType);
         } catch (err) {
           logError("Failed to process message", err);
           await channel.sendMessage("처리 중 오류가 발생했습니다.");
@@ -534,7 +613,7 @@ export async function startDaemon(): Promise<void> {
           try {
             processing = true;
             startProgressUpdates(channel);
-            await processMessage(channel, ch, followUp);
+            await processMessage(channel, ch, followUp, "general");
           } catch (err) {
             logError("Failed to process /btw follow-up", err);
           } finally {
@@ -544,14 +623,20 @@ export async function startDaemon(): Promise<void> {
         }
       }
 
-      // Process pending messages that arrived during processing
+      // Process pending messages (priority: coding > research > general)
+      if (pendingMessages.length > 0) {
+        pendingMessages.sort((a, b) => {
+          const priority: Record<TaskType, number> = { coding: 0, research: 1, general: 2, quick: 3 };
+          return priority[a.taskType] - priority[b.taskType];
+        });
+      }
       while (pendingMessages.length > 0) {
         const pending = pendingMessages.shift()!;
-        log(`[pending] processing queued message: ${pending.slice(0, 60)}...`);
+        log(`[pending] processing (${pending.taskType}): ${pending.text.slice(0, 60)}...`);
         try {
           processing = true;
           startProgressUpdates(channel);
-          await processMessage(channel, ch, pending);
+          await processMessage(channel, ch, pending.text, pending.taskType);
         } catch (err) {
           logError("Failed to process pending message", err);
           await channel.sendMessage("처리 중 오류가 발생했습니다.");
