@@ -2,7 +2,7 @@ import { readFile, readdir, unlink } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { join } from "node:path";
-import { config } from "../config.js";
+import { config, type TaskType } from "../config.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -110,6 +110,7 @@ async function findMostRecent(dir: string): Promise<string | null> {
 export async function buildSystemPrompt(
   channelId: string,
   senderName: string,
+  taskType?: TaskType,
 ): Promise<string> {
   const ws = config.workspace;
   const today = new Date();
@@ -170,24 +171,13 @@ export async function buildSystemPrompt(
     },
   ];
 
-  // Add strategy files for sub-agent orchestration
-  const strategyFiles: FileSpec[] = [
-    {
-      label: "STRATEGY: DEV-TEAM (Youngsu)",
-      path: join(config.subAgents.strategiesPath, "dev-team-youngsu.md"),
-      maxChars: 8000,
-    },
-    {
-      label: "STRATEGY: DEV-TEAM (Common)",
-      path: join(config.subAgents.strategiesPath, "dev-team-common.md"),
-      maxChars: 5000,
-    },
-    {
-      label: "STRATEGY: DEV-TEAM (Process)",
-      path: join(config.subAgents.strategiesPath, "dev-team-process.md"),
-      maxChars: 5000,
-    },
-  ];
+  // Add strategy files based on task type (coding → FE/BE, research → Strategy, general → PM)
+  const strategyEntries = config.subAgents.strategyMapping[taskType ?? "general"];
+  const strategyFiles: FileSpec[] = strategyEntries.map((entry) => ({
+    label: `STRATEGY: ${entry.label}`,
+    path: join(config.subAgents.strategiesPath, entry.file),
+    maxChars: entry.maxChars,
+  }));
 
   const sections: string[] = [];
   for (const { label, path, maxChars, deleteAfterLoad } of [
@@ -249,10 +239,24 @@ export async function buildSystemPrompt(
 
   const phone = config.channels.june.phone;
   const toolsPath = config.subAgents.toolsPath;
+  const sessionType = taskType ?? "general";
+  const taskRoleMap: Record<TaskType, string> = {
+    coding: `Session type: CODING — Apply Youngsik (Frontend) and Youngchul (Backend) engineering principles.
+Focus: implementation quality, type safety, testing, code review standards.
+Available on-demand (read strategy file before delegating): Junho (QA), Taeyoung (DevOps), Youngho (Design).`,
+    research: `Session type: RESEARCH — Apply Kwangsoo (Strategy) and Sangchul (Marketing) analysis principles.
+Focus: evidence-based analysis, source hierarchy (S-Tier > A-Tier), market sizing, competitive intelligence.
+Available on-demand: Kwangsoo for deep financial/trading analysis.`,
+    general: `Session type: GENERAL — You are the orchestrator (PM/Director).
+Focus: planning, coordination, delegation, product decisions, user communication.
+Delegate to sub-agents when specialized work is needed.`,
+    quick: `Session type: QUICK — Concise response only.`,
+  };
   const runtimeContext = `<runtime_context>
 Time: ${formatTimePT(today)}
 Channel: iMessage from ${senderName} (${phone})
 You are Youngsu. Respond in the style defined in SOUL.md.
+${taskRoleMap[sessionType]}
 You have Bash tool — use it to call: imsg, gh, memo, remindctl, things, weather via wttr.in
 
 Message delivery: The daemon auto-sends your text response as an iMessage. Do NOT also send it yourself via "imsg send" — that causes duplicates. Only use "imsg send" for PROACTIVE messages (alerts, news, broadcasts to other recipients) that are separate from your reply to the current message.
