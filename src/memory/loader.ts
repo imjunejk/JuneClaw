@@ -276,7 +276,43 @@ Send iMessage (proactive only): Bash("imsg send --to ${phone} --text \\"...\\"")
   parts.push(runtimeContext);
 
   const prompt = parts.join("\n\n");
-  const PROMPT_WARN_THRESHOLD = 80_000;
+
+  // Per-section size breakdown so we can identify the biggest contributors
+  // to prompt bloat (H2 investigation). Derived from the already-built
+  // section strings so the loader path doesn't need parallel bookkeeping.
+  // Note: each size includes the "## LABEL\n" header (~20-30 chars), since
+  // that header also contributes to the final prompt length.
+  const sectionEntries = sections.map((s) => {
+    // Sections are always pushed as `## ${label}\n${content}` by this file —
+    // see the push sites above — so slicing past the "## " prefix and up to
+    // the first newline gives us the label back.
+    const firstNewline = s.indexOf("\n");
+    const rawLabel = firstNewline > 0 ? s.slice(3, firstNewline) : "UNKNOWN";
+    // Preserve the parenthesised qualifier that distinguishes e.g.
+    // "DAILY (today)" from "DAILY (yesterday)" or the four STRATEGY files
+    // from each other — just escape whitespace and "=" so the key=value
+    // format stays unambiguous.
+    const label = rawLabel.replace(/[\s=]+/g, "_");
+    return `${label}=${s.length}`;
+  });
+  // Overhead = everything in the final prompt that isn't a loader section:
+  // `<workspace_context>` wrapper, section join separators, conversation
+  // history (from imsg), runtime_context template, and part separators.
+  // Logging it explicitly so readers can reconcile sum(sections) + overhead
+  // ≈ total without having to infer it.
+  const sectionsTotal = sections.reduce((sum, s) => sum + s.length, 0);
+  const overhead = prompt.length - sectionsTotal;
+  const taskLabel = taskType ?? "general";
+  console.log(
+    `[loader] ${channelId}/${taskLabel} total=${prompt.length} overhead=${overhead} sections=${sections.length} [${sectionEntries.join(" ")}]`,
+  );
+
+  // Threshold raised from 80k to 100k after measurement showed the steady
+  // state is 82-93k depending on task type, dominated by legitimately-loaded
+  // content (master-rules, SUB_AGENTS, daily logs, strategies). The old 80k
+  // threshold fired on every call and was noise; this should only fire on
+  // pathological outliers now.
+  const PROMPT_WARN_THRESHOLD = 100_000;
   if (prompt.length > PROMPT_WARN_THRESHOLD) {
     console.warn(
       `[loader] system prompt is ${prompt.length} chars (threshold: ${PROMPT_WARN_THRESHOLD})`,
