@@ -196,8 +196,8 @@ export async function buildSystemPrompt(
     }
   }
 
-  // Load skill definitions from .openclaw/skills/
-  const skillsDir = join(ws, ".openclaw", "skills");
+  // Load skill definitions from skills/
+  const skillsDir = join(ws, "skills");
   try {
     const skillEntries = await readdir(skillsDir, { withFileTypes: true });
     for (const entry of skillEntries) {

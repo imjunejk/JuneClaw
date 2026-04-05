@@ -17,7 +17,6 @@ const DEFAULT_TIMEOUT_MS = 10 * 60_000;
 /** Per-job timeout overrides (ms). */
 const JOB_TIMEOUTS: Record<string, number> = {
   heartbeat: 5 * 60_000,       // 5 min
-  lessonsLoop: 15 * 60_000,    // 15 min
   weeklyCompression: 15 * 60_000,
   monthlyCompression: 15 * 60_000,
 };

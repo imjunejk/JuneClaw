@@ -35,7 +35,6 @@ import {
   pruneStaleStates,
 } from "./agent/context-rotation.js";
 import {
-  runLessonsLoop,
   runWeeklyCompression,
   runMonthlyCompression,
 } from "./memory/consolidation.js";
@@ -548,19 +547,7 @@ function initCronScheduler(channel: Channel, channelConfig: ChannelConfig): void
     runHeartbeat(channel, channelConfig),
   );
 
-  addJob("lessonsLoop", config.cron.schedules.lessonsLoop!, async () => {
-    log("[cron] running lessons loop...");
-    await emit("cron:started", { job: "lessonsLoop" });
-    try {
-      await runLessonsLoop();
-      log("[cron] lessons loop completed");
-      await emit("cron:completed", { job: "lessonsLoop" });
-    } catch (err) {
-      logError("[cron] lessons loop failed", err);
-      await logFromError(err, "cron:lessonsLoop");
-      await emit("cron:failed", { job: "lessonsLoop", error: String(err) });
-    }
-  });
+  // lessonsLoop removed — now handled by Claude Code remote trigger (daily 00:00 PDT)
 
   addJob("weeklyCompression", config.cron.schedules.weeklyCompression!, async () => {
     log("[cron] running weekly compression...");
