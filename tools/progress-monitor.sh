@@ -71,15 +71,27 @@ check_once() {
   fi
 
   local started_at agent_name task_type preview PHONE
-  eval $(python3 -c "
-import json
-s = json.load(open('$STATE_FILE'))
-print(f\"started_at={s['startedAt']}\")
-print(f\"agent_name={s['agentName']}\")
-print(f\"task_type={s['taskType']}\")
-print(f\"preview={s['messagePreview']}\")
-print(f\"PHONE={s.get('phone', '')}\")
-" 2>/dev/null) || return 0
+  local _parsed
+  _parsed=$(python3 -c '
+import json, sys, os
+try:
+    s = json.load(open(os.path.expanduser("'"$STATE_FILE"'")))
+    sys.stdout.write(str(s["startedAt"]) + "\n")
+    sys.stdout.write(str(s["agentName"]) + "\n")
+    sys.stdout.write(str(s["taskType"]) + "\n")
+    sys.stdout.write(str(s.get("messagePreview", "")) + "\n")
+    sys.stdout.write(str(s.get("phone", "")) + "\n")
+except Exception:
+    sys.exit(1)
+' 2>/dev/null) || return 0
+
+  {
+    read -r started_at
+    read -r agent_name
+    read -r task_type
+    read -r preview
+    read -r PHONE
+  } <<< "$_parsed"
 
   local now_ms
   now_ms=$(python3 -c "import time; print(int(time.time() * 1000))")
