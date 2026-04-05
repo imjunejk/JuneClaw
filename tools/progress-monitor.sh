@@ -21,6 +21,7 @@ send_progress() {
   local elapsed_sec="$2"
   local preview="$3"
   local task_type="$4"
+  local phone="$5"
 
   local elapsed_min=$(( elapsed_sec / 60 ))
   local elapsed_remainder=$(( elapsed_sec % 60 ))
@@ -60,9 +61,16 @@ send_progress() {
     fi
   fi
 
-  imsg send --to "$PHONE" --text "$msg" 2>/dev/null && \
-    echo "[progress-monitor] sent: $msg" || \
-    echo "[progress-monitor] send failed"
+  if [ -z "$phone" ]; then
+    echo "[progress-monitor] skip: phone empty"
+    return 0
+  fi
+
+  if imsg send --to "$phone" --text "$msg" >/dev/null 2>&1; then
+    echo "[progress-monitor] sent: ${task_type} ${agent_name} ${time_str}"
+  else
+    echo "[progress-monitor] send failed (to=$phone)"
+  fi
 }
 
 check_once() {
@@ -71,15 +79,27 @@ check_once() {
   fi
 
   local started_at agent_name task_type preview PHONE
-  eval $(python3 -c "
-import json
-s = json.load(open('$STATE_FILE'))
-print(f\"started_at={s['startedAt']}\")
-print(f\"agent_name={s['agentName']}\")
-print(f\"task_type={s['taskType']}\")
-print(f\"preview={s['messagePreview']}\")
-print(f\"PHONE={s.get('phone', '')}\")
-" 2>/dev/null) || return 0
+  local _parsed
+  _parsed=$(python3 -c '
+import json, sys, os
+try:
+    s = json.load(open(os.path.expanduser("'"$STATE_FILE"'")))
+    sys.stdout.write(str(s["startedAt"]) + "\n")
+    sys.stdout.write(str(s["agentName"]) + "\n")
+    sys.stdout.write(str(s["taskType"]) + "\n")
+    sys.stdout.write(str(s.get("messagePreview", "")) + "\n")
+    sys.stdout.write(str(s.get("phone", "")) + "\n")
+except Exception:
+    sys.exit(1)
+' 2>/dev/null) || return 0
+
+  {
+    read -r started_at
+    read -r agent_name
+    read -r task_type
+    read -r preview
+    read -r PHONE
+  } <<< "$_parsed"
 
   local now_ms
   now_ms=$(python3 -c "import time; print(int(time.time() * 1000))")
@@ -95,10 +115,10 @@ print(f\"PHONE={s.get('phone', '')}\")
   local now_sec
   now_sec=$(date +%s)
   if [ "$last_notified" -eq 0 ]; then
-    send_progress "$agent_name" "$elapsed_sec" "$preview" "$task_type"
+    send_progress "$agent_name" "$elapsed_sec" "$preview" "$task_type" "$PHONE"
     last_notified=$now_sec
   elif [ $(( now_sec - last_notified )) -ge "$INTERVAL" ]; then
-    send_progress "$agent_name" "$elapsed_sec" "$preview" "$task_type"
+    send_progress "$agent_name" "$elapsed_sec" "$preview" "$task_type" "$PHONE"
     last_notified=$now_sec
   fi
 }
