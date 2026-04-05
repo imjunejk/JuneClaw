@@ -77,6 +77,10 @@ function spawnClaude(args: string[], prompt: string): Promise<string> {
 
     const timer = setTimeout(() => {
       child.kill("SIGTERM");
+      // Escalate to SIGKILL if process ignores SIGTERM, so the retry doesn't race a zombie
+      setTimeout(() => {
+        try { child.kill("SIGKILL"); } catch { /* already dead */ }
+      }, 5_000);
       reject(new Error("TIMEOUT: claude exceeded time limit"));
     }, config.claude.timeoutMs);
 

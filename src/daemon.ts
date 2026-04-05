@@ -112,6 +112,23 @@ async function clearProgressState(): Promise<void> {
   }
 }
 
+/**
+ * Wrap a long-running async task with a liveness heartbeat.
+ * Updates state.lastLoopAt every 30s so the watchdog doesn't falsely detect a hang
+ * while Claude CLI is legitimately running (which can take up to 10-20 minutes).
+ */
+async function withProcessingLiveness<T>(fn: () => Promise<T>): Promise<T> {
+  const interval = setInterval(() => {
+    state.lastLoopAt = new Date().toISOString();
+    saveState().catch(() => {});
+  }, 30_000);
+  try {
+    return await fn();
+  } finally {
+    clearInterval(interval);
+  }
+}
+
 function startProgressMonitor(): void {
   monitorStopped = false;
   const scriptPath = join(dirname(new URL(import.meta.url).pathname), "..", "tools", "progress-monitor.sh");
@@ -667,7 +684,7 @@ export async function startDaemon(): Promise<void> {
         try {
           processing = true;
           await writeProgressState(taskType, msg.text, ch.phone);
-          await processMessage(channel, ch, msg.text, taskType);
+          await withProcessingLiveness(() => processMessage(channel, ch, msg.text, taskType));
         } catch (err) {
           logError("Failed to process message", err);
           await channel.sendMessage("처리 중 오류가 발생했습니다.");
@@ -686,7 +703,7 @@ export async function startDaemon(): Promise<void> {
           try {
             processing = true;
             await writeProgressState("general", followUp, ch.phone);
-            await processMessage(channel, ch, followUp, "general");
+            await withProcessingLiveness(() => processMessage(channel, ch, followUp, "general"));
           } catch (err) {
             logError("Failed to process /btw follow-up", err);
           } finally {
@@ -709,7 +726,7 @@ export async function startDaemon(): Promise<void> {
         try {
           processing = true;
           await writeProgressState(pending.taskType, pending.text, ch.phone);
-          await processMessage(channel, ch, pending.text, pending.taskType);
+          await withProcessingLiveness(() => processMessage(channel, ch, pending.text, pending.taskType));
         } catch (err) {
           logError("Failed to process pending message", err);
           await channel.sendMessage("처리 중 오류가 발생했습니다.");
