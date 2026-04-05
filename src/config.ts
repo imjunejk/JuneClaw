@@ -48,6 +48,14 @@ export const config = {
   progress: {
     firstDelayMs: 15_000,
     intervalMs: 45_000,
+    statePath: join(home, ".juneclaw", "progress-state.json"),
+    /** Display names for progress notifications per task type */
+    agentNames: {
+      coding: "영식+영철",
+      research: "광수+상철",
+      general: "영수",
+      quick: "",
+    } satisfies Record<TaskType, string>,
   },
   sessionPool: {
     idleTimeouts: {
@@ -76,6 +84,7 @@ export const config = {
     strategyMapping: {
       coding: [
         { file: "dev-team-common.md", label: "DEV-TEAM (Common)", maxChars: 5000 },
+        { file: "dev-team-process.md", label: "DEV-TEAM (Process)", maxChars: 5000 },
         { file: "dev-team-youngsik.md", label: "DEV-TEAM (Youngsik — FE)", maxChars: 3000 },
         { file: "dev-team-youngchul.md", label: "DEV-TEAM (Youngchul — BE)", maxChars: 3000 },
       ],

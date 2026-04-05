@@ -5,7 +5,8 @@
 # Detection:
 #   1) Daemon health (PID file + process alive)
 #   2) Error signature scan (daemon.err heuristic)
-#   3) Silence detection (Messages DB — no outbound in N seconds)
+#   3) Hang detection (state.json heartbeat staleness — 20min threshold)
+#   4) Silence detection (Messages DB — no outbound in N seconds)
 #
 # Recovery:
 #   unhealthy → launchctl kickstart → re-check
@@ -103,6 +104,45 @@ is_healthy() {
   kill -0 "$pid" 2>/dev/null
 }
 
+# ── Hang detection (heartbeat staleness) ─────────────────────────────────
+HANG_THRESHOLD_SECS=1200  # 20 min — heartbeat runs every 10 min, so 2 missed = hung
+STATE_JSON="$JUNECLAW_HOME/state.json"
+
+is_hung() {
+  # Only check if daemon process is alive (hang = alive but stuck)
+  is_healthy || return 1
+
+  [[ -f "$STATE_JSON" ]] || return 1
+
+  local last_hb
+  last_hb=$(python3 -c "
+import json, sys
+from datetime import datetime, timezone
+try:
+    s = json.load(open('$STATE_JSON'))
+    hb = s.get('lastHeartbeatAt')
+    if not hb:
+        # No heartbeat yet — check startedAt instead
+        started = s.get('startedAt', '')
+        if not started:
+            sys.exit(1)
+        dt = datetime.fromisoformat(started.replace('Z', '+00:00'))
+        print(int(dt.timestamp()))
+    else:
+        dt = datetime.fromisoformat(hb.replace('Z', '+00:00'))
+        print(int(dt.timestamp()))
+except Exception:
+    sys.exit(1)
+" 2>/dev/null) || return 1
+
+  local elapsed=$(( NOW - last_hb ))
+  if [[ "$elapsed" -gt "$HANG_THRESHOLD_SECS" ]]; then
+    HUNG_SECS=$elapsed
+    return 0
+  fi
+  return 1
+}
+
 # ── Error signature scan ─────────────────────────────────────────────────
 has_error_signatures() {
   [[ -f "$DAEMON_ERR_LOG" ]] || return 1
@@ -149,6 +189,7 @@ PREV_STATE=$(cat "$STATE_FILE")
 needs_fix=0
 reasons=()
 force_restart=0
+HUNG_SECS=0
 
 if ! is_healthy; then
   needs_fix=1
@@ -158,6 +199,19 @@ fi
 if has_error_signatures; then
   needs_fix=1
   reasons+=("error_signature_detected")
+fi
+
+if is_hung; then
+  needs_fix=1
+  force_restart=1
+  reasons+=("daemon_hung_${HUNG_SECS}s")
+  log "Daemon hung detected (${HUNG_SECS}s since last heartbeat). Killing PID."
+  hung_pid=$(cat "$PID_FILE" 2>/dev/null)
+  if [[ -n "$hung_pid" ]]; then
+    kill -SIGTERM "$hung_pid" 2>/dev/null || true
+    sleep 3
+    kill -0 "$hung_pid" 2>/dev/null && kill -SIGKILL "$hung_pid" 2>/dev/null || true
+  fi
 fi
 
 if is_silent; then

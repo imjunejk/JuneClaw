@@ -1,7 +1,7 @@
 import { writeFile, readFile, unlink, mkdir } from "node:fs/promises";
-import { execFile } from "node:child_process";
+import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { promisify } from "node:util";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 
 const execFileAsync = promisify(execFile);
 import { config, type ChannelConfig, type TaskType } from "./config.js";
@@ -71,33 +71,88 @@ const processedIds = new Set<number>();
 let processing = false;
 const btwQueue: string[] = [];
 const pendingMessages: { text: string; taskType: TaskType }[] = [];
-let progressTimer: ReturnType<typeof setTimeout> | null = null;
-let progressInterval: ReturnType<typeof setInterval> | null = null;
+let monitorProcess: ChildProcess | null = null;
+let monitorStopped = false;
 
-function startProgressUpdates(channel: Channel): void {
-  const startedAt = Date.now();
-  progressTimer = setTimeout(() => {
-    log("[progress] sending initial progress message");
-    channel.sendMessage("작업 진행 중...").then(() => {
-      log("[progress] sent: 작업 진행 중...");
-    }).catch((err) => {
-      log(`[progress] send failed: ${err instanceof Error ? err.message : String(err)}`);
-    });
-    progressInterval = setInterval(() => {
-      const mins = Math.round((Date.now() - startedAt) / 60_000);
-      const msg = `작업 진행 중... (${mins}분 경과)`;
-      channel.sendMessage(msg).then(() => {
-        log(`[progress] sent: ${msg}`);
-      }).catch((err) => {
-        log(`[progress] send failed: ${err instanceof Error ? err.message : String(err)}`);
-      });
-    }, config.progress.intervalMs);
-  }, config.progress.firstDelayMs);
+interface ProgressState {
+  startedAt: number;
+  taskType: string;
+  agentName: string;
+  model: string;
+  messagePreview: string;
+  phone: string;
 }
 
-function stopProgressUpdates(): void {
-  if (progressTimer) { clearTimeout(progressTimer); progressTimer = null; }
-  if (progressInterval) { clearInterval(progressInterval); progressInterval = null; }
+async function writeProgressState(taskType: TaskType, text: string, phone: string): Promise<void> {
+  const state: ProgressState = {
+    startedAt: Date.now(),
+    taskType,
+    agentName: config.progress.agentNames[taskType],
+    model: config.claude.modelRouting[taskType],
+    messagePreview: text.slice(0, 100),
+    phone,
+  };
+  try {
+    await mkdir(dirname(config.progress.statePath), { recursive: true });
+    await writeFile(config.progress.statePath, JSON.stringify(state, null, 2), "utf-8");
+    log(`[progress] state written: ${state.agentName} (${taskType})`);
+  } catch (err) {
+    log(`[progress] failed to write state: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+async function clearProgressState(): Promise<void> {
+  try {
+    await unlink(config.progress.statePath);
+    log("[progress] state cleared");
+  } catch {
+    // file may not exist
+  }
+}
+
+function startProgressMonitor(): void {
+  monitorStopped = false;
+  const scriptPath = join(dirname(new URL(import.meta.url).pathname), "..", "tools", "progress-monitor.sh");
+  monitorProcess = spawn("bash", [scriptPath], {
+    stdio: ["ignore", "pipe", "pipe"],
+    detached: false,
+  });
+
+  monitorProcess.stdout?.on("data", (chunk: Buffer) => {
+    const line = chunk.toString().trim();
+    if (line) log(`[monitor] ${line}`);
+  });
+
+  monitorProcess.stderr?.on("data", (chunk: Buffer) => {
+    const line = chunk.toString().trim();
+    if (line) log(`[monitor:err] ${line}`);
+  });
+
+  monitorProcess.on("exit", (code) => {
+    log(`[monitor] exited with code ${code}`);
+    monitorProcess = null;
+    // Respawn the monitor after a brief delay so progress notifications
+    // aren't permanently lost if the monitor crashes.
+    if (!monitorStopped) {
+      setTimeout(() => {
+        if (!monitorStopped && monitorProcess === null) {
+          log("[monitor] respawning after crash...");
+          startProgressMonitor();
+        }
+      }, 5000);
+    }
+  });
+
+  log(`[monitor] started (PID ${monitorProcess.pid})`);
+}
+
+function stopProgressMonitor(): void {
+  monitorStopped = true;
+  if (monitorProcess) {
+    monitorProcess.kill("SIGTERM");
+    monitorProcess = null;
+    log("[monitor] stopped");
+  }
 }
 
 async function killDuplicateProcesses(): Promise<void> {
@@ -525,9 +580,16 @@ export async function startDaemon(): Promise<void> {
 
   initCronScheduler(channel, ch);
 
+  // Clean stale progress state from previous run
+  await clearProgressState();
+
+  // Start external progress monitor (background shell script)
+  startProgressMonitor();
+
   const shutdown = async (signal: string) => {
     log(`Received ${signal}, shutting down...`);
     await emit("daemon:shutdown", { signal });
+    stopProgressMonitor();
     stopAllCron();
 
     // Write handoff for next session
@@ -593,13 +655,13 @@ export async function startDaemon(): Promise<void> {
 
         try {
           processing = true;
-          startProgressUpdates(channel);
+          await writeProgressState(taskType, msg.text, ch.phone);
           await processMessage(channel, ch, msg.text, taskType);
         } catch (err) {
           logError("Failed to process message", err);
           await channel.sendMessage("처리 중 오류가 발생했습니다.");
         } finally {
-          stopProgressUpdates();
+          await clearProgressState();
           processing = false;
         }
 
@@ -612,12 +674,12 @@ export async function startDaemon(): Promise<void> {
           log(`[btw] processing ${btws.length} queued message(s)`);
           try {
             processing = true;
-            startProgressUpdates(channel);
+            await writeProgressState("general", followUp, ch.phone);
             await processMessage(channel, ch, followUp, "general");
           } catch (err) {
             logError("Failed to process /btw follow-up", err);
           } finally {
-            stopProgressUpdates();
+            await clearProgressState();
             processing = false;
           }
         }
@@ -635,13 +697,13 @@ export async function startDaemon(): Promise<void> {
         log(`[pending] processing (${pending.taskType}): ${pending.text.slice(0, 60)}...`);
         try {
           processing = true;
-          startProgressUpdates(channel);
+          await writeProgressState(pending.taskType, pending.text, ch.phone);
           await processMessage(channel, ch, pending.text, pending.taskType);
         } catch (err) {
           logError("Failed to process pending message", err);
           await channel.sendMessage("처리 중 오류가 발생했습니다.");
         } finally {
-          stopProgressUpdates();
+          await clearProgressState();
           processing = false;
         }
       }
