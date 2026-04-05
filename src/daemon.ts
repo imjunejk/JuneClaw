@@ -1,7 +1,7 @@
 import { writeFile, readFile, unlink, mkdir } from "node:fs/promises";
-import { execFile } from "node:child_process";
+import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { promisify } from "node:util";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 
 const execFileAsync = promisify(execFile);
 import { config, type ChannelConfig, type TaskType } from "./config.js";
@@ -71,6 +71,7 @@ const processedIds = new Set<number>();
 let processing = false;
 const btwQueue: string[] = [];
 const pendingMessages: { text: string; taskType: TaskType }[] = [];
+let monitorProcess: ChildProcess | null = null;
 import { writeFile as fsWriteFile, unlink as fsUnlink, mkdir as fsMkdir } from "node:fs/promises";
 
 interface ProgressState {
@@ -106,6 +107,39 @@ async function clearProgressState(): Promise<void> {
     log("[progress] state cleared");
   } catch {
     // file may not exist
+  }
+}
+
+function startProgressMonitor(): void {
+  const scriptPath = join(dirname(new URL(import.meta.url).pathname), "..", "tools", "progress-monitor.sh");
+  monitorProcess = spawn("bash", [scriptPath], {
+    stdio: ["ignore", "pipe", "pipe"],
+    detached: false,
+  });
+
+  monitorProcess.stdout?.on("data", (chunk: Buffer) => {
+    const line = chunk.toString().trim();
+    if (line) log(`[monitor] ${line}`);
+  });
+
+  monitorProcess.stderr?.on("data", (chunk: Buffer) => {
+    const line = chunk.toString().trim();
+    if (line) log(`[monitor:err] ${line}`);
+  });
+
+  monitorProcess.on("exit", (code) => {
+    log(`[monitor] exited with code ${code}`);
+    monitorProcess = null;
+  });
+
+  log(`[monitor] started (PID ${monitorProcess.pid})`);
+}
+
+function stopProgressMonitor(): void {
+  if (monitorProcess) {
+    monitorProcess.kill("SIGTERM");
+    monitorProcess = null;
+    log("[monitor] stopped");
   }
 }
 
@@ -534,9 +568,16 @@ export async function startDaemon(): Promise<void> {
 
   initCronScheduler(channel, ch);
 
+  // Clean stale progress state from previous run
+  await clearProgressState();
+
+  // Start external progress monitor (background shell script)
+  startProgressMonitor();
+
   const shutdown = async (signal: string) => {
     log(`Received ${signal}, shutting down...`);
     await emit("daemon:shutdown", { signal });
+    stopProgressMonitor();
     stopAllCron();
 
     // Write handoff for next session
