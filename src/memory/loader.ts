@@ -276,7 +276,31 @@ Send iMessage (proactive only): Bash("imsg send --to ${phone} --text \\"...\\"")
   parts.push(runtimeContext);
 
   const prompt = parts.join("\n\n");
-  const PROMPT_WARN_THRESHOLD = 80_000;
+
+  // Per-section size breakdown so we can identify the biggest contributors
+  // to prompt bloat (H2 investigation). Derived from the already-built
+  // section strings so the loader path doesn't need parallel bookkeeping.
+  const sectionSizes = sections.map((s) => {
+    const firstNewline = s.indexOf("\n");
+    const rawLabel = firstNewline > 0 ? s.slice(3, firstNewline) : "UNKNOWN";
+    // Preserve the full label (including the parenthesised qualifier that
+    // distinguishes e.g. "DAILY (today)" from "DAILY (yesterday)" or the
+    // four strategy files from each other) — just escape whitespace and
+    // "=" so the key=value format stays unambiguous.
+    const label = rawLabel.replace(/[\s=]+/g, "_");
+    return `${label}=${s.length}`;
+  });
+  const taskLabel = taskType ?? "general";
+  console.log(
+    `[loader] ${taskLabel} total=${prompt.length} sections=${sections.length} [${sectionSizes.join(" ")}]`,
+  );
+
+  // Threshold raised from 80k to 100k after measurement showed the steady
+  // state is 82-93k depending on task type, dominated by legitimately-loaded
+  // content (master-rules, SUB_AGENTS, daily logs, strategies). The old 80k
+  // threshold fired on every call and was noise; this should only fire on
+  // pathological outliers now.
+  const PROMPT_WARN_THRESHOLD = 100_000;
   if (prompt.length > PROMPT_WARN_THRESHOLD) {
     console.warn(
       `[loader] system prompt is ${prompt.length} chars (threshold: ${PROMPT_WARN_THRESHOLD})`,
