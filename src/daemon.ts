@@ -1,4 +1,4 @@
-import { writeFile, readFile, unlink, mkdir } from "node:fs/promises";
+import { writeFile, readFile, unlink, mkdir, rename } from "node:fs/promises";
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { promisify } from "node:util";
 import { dirname, join } from "node:path";
@@ -87,17 +87,24 @@ interface ProgressState {
 }
 
 async function writeProgressState(taskType: TaskType, text: string, phone: string): Promise<void> {
+  // Collapse whitespace (including newlines) so downstream shell parsers can't
+  // be tripped up by multi-line previews.
+  const preview = text.slice(0, 100).replace(/\s+/g, " ").trim();
   const state: ProgressState = {
     startedAt: Date.now(),
     taskType,
     agentName: config.progress.agentNames[taskType],
     model: config.claude.modelRouting[taskType],
-    messagePreview: text.slice(0, 100),
+    messagePreview: preview,
     phone,
   };
   try {
     await mkdir(dirname(config.progress.statePath), { recursive: true });
-    await writeFile(config.progress.statePath, JSON.stringify(state, null, 2), "utf-8");
+    // Atomic write: write to tmp then rename, so the monitor never sees a
+    // partially-written JSON during its 5s poll.
+    const tmpPath = config.progress.statePath + ".tmp";
+    await writeFile(tmpPath, JSON.stringify(state, null, 2), "utf-8");
+    await rename(tmpPath, config.progress.statePath);
     log(`[progress] state written: ${state.agentName} (${taskType})`);
   } catch (err) {
     log(`[progress] failed to write state: ${err instanceof Error ? err.message : String(err)}`);

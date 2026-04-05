@@ -21,6 +21,16 @@ send_progress() {
   local elapsed_sec="$2"
   local preview="$3"
   local task_type="$4"
+  # Default to empty under set -u so a short-arg caller can't kill the loop.
+  local phone="${5:-}"
+
+  # Short-circuit before any expensive work (esp. agent-lifecycle.sh, which
+  # currently emits spammy usage text on every call) if we have nothing to
+  # send to.
+  if [ -z "$phone" ]; then
+    echo "[progress-monitor] skip: phone empty"
+    return 0
+  fi
 
   local elapsed_min=$(( elapsed_sec / 60 ))
   local elapsed_remainder=$(( elapsed_sec % 60 ))
@@ -60,9 +70,16 @@ send_progress() {
     fi
   fi
 
-  imsg send --to "$PHONE" --text "$msg" 2>/dev/null && \
-    echo "[progress-monitor] sent: $msg" || \
-    echo "[progress-monitor] send failed"
+  # Capture imsg's combined output so failures include the underlying error
+  # (which is how the "Missing required option: --to" regression was found).
+  local imsg_out
+  if imsg_out=$(imsg send --to "$phone" --text "$msg" 2>&1); then
+    echo "[progress-monitor] sent: ${task_type} ${agent_name} ${time_str}"
+  else
+    # Collapse newlines so the failure fits on a single log line.
+    local imsg_err="${imsg_out//$'\n'/ | }"
+    echo "[progress-monitor] send failed (to=$phone): ${imsg_err}"
+  fi
 }
 
 check_once() {
@@ -107,10 +124,10 @@ except Exception:
   local now_sec
   now_sec=$(date +%s)
   if [ "$last_notified" -eq 0 ]; then
-    send_progress "$agent_name" "$elapsed_sec" "$preview" "$task_type"
+    send_progress "$agent_name" "$elapsed_sec" "$preview" "$task_type" "$PHONE"
     last_notified=$now_sec
   elif [ $(( now_sec - last_notified )) -ge "$INTERVAL" ]; then
-    send_progress "$agent_name" "$elapsed_sec" "$preview" "$task_type"
+    send_progress "$agent_name" "$elapsed_sec" "$preview" "$task_type" "$PHONE"
     last_notified=$now_sec
   fi
 }
