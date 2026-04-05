@@ -586,6 +586,11 @@ export async function startDaemon(): Promise<void> {
   // Start external progress monitor (background shell script)
   startProgressMonitor();
 
+  // Notify June that daemon has started
+  await channel.sendMessage("JuneClaw restarted").catch((err) => {
+    log(`[startup] failed to send restart notification: ${err instanceof Error ? err.message : String(err)}`);
+  });
+
   const shutdown = async (signal: string) => {
     log(`Received ${signal}, shutting down...`);
     await emit("daemon:shutdown", { signal });
