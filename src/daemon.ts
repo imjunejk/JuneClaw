@@ -15,7 +15,7 @@ import { recordExchange, getRecentContext, appendSharedContext, getSharedContext
 import { buildSystemPrompt } from "./memory/loader.js";
 import { appendDailyLog, appendSystemLog } from "./memory/writer.js";
 import { addJob, stopAll as stopAllCron } from "./scheduler/cron.js";
-import { cascadeKill, cleanupStaleAgents, archiveCompleted } from "./agent/subagents.js";
+import { cascadeKill, cleanupStaleAgents, cleanupCompletedAgents } from "./agent/subagents.js";
 import { writeHandoff, writeSmartHandoff } from "./memory/handoff.js";
 import { emit } from "./hooks/events.js";
 import { logFromError } from "./hooks/incident.js";
@@ -503,9 +503,11 @@ async function runHeartbeat(
       log(`[heartbeat] orphan cleanup: ${orphanResult}`);
       await emit("agent:orphan_detected", { result: orphanResult });
     }
-    const archiveResult = await archiveCompleted();
-    if (archiveResult && !archiveResult.includes("Archived 0")) {
-      log(`[heartbeat] ${archiveResult}`);
+    // cmd_cleanup prints "Cleaned N entries. M running." — suppress the
+    // no-op case (N == 0) so we only log when something actually happened.
+    const cleanupResult = await cleanupCompletedAgents();
+    if (cleanupResult && !cleanupResult.startsWith("Cleaned 0 ")) {
+      log(`[heartbeat] ${cleanupResult}`);
     }
     const pruned = pruneStaleStates();
     if (pruned > 0) log(`[heartbeat] pruned ${pruned} stale rotation states`);

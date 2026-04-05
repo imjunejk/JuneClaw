@@ -58,8 +58,13 @@ export async function cleanupStaleAgents(): Promise<string> {
   return `killed ${ids.length} orphans: ${results.join("; ")}`;
 }
 
-export async function archiveCompleted(): Promise<string> {
-  return runTool(lifecycleScript, ["archive"]);
+export async function cleanupCompletedAgents(): Promise<string> {
+  // Calls the external agent-lifecycle.sh `cleanup` subcommand, which prunes
+  // non-running entries from the registry. The previous name `archive` +
+  // `["archive"]` mismatched the external script (which only has `cleanup`)
+  // so every heartbeat was hitting the script's `*)` fallback and logging
+  // the usage text as if it were a valid result.
+  return runTool(lifecycleScript, ["cleanup"]);
 }
 
 export async function sendMailbox(
