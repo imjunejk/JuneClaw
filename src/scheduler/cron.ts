@@ -46,20 +46,28 @@ export function addJob(
       }
       executing.add(name);
       const start = Date.now();
+      let timedOut = false;
 
       const timer = setTimeout(() => {
-        console.error(`[cron] job "${name}" timed out after ${timeoutMs}ms`);
+        timedOut = true;
+        console.error(`[cron] job "${name}" timed out after ${timeoutMs}ms — releasing lock`);
         executing.delete(name);
       }, timeoutMs);
 
       Promise.resolve(callback())
         .catch((err) => {
-          console.error(`[cron] job "${name}" failed:`, err);
+          if (!timedOut) {
+            console.error(`[cron] job "${name}" failed:`, err);
+          }
         })
         .finally(() => {
           clearTimeout(timer);
-          executing.delete(name);
-          console.log(`[cron] job "${name}" finished in ${Date.now() - start}ms`);
+          if (!timedOut) {
+            executing.delete(name);
+            console.log(`[cron] job "${name}" finished in ${Date.now() - start}ms`);
+          } else {
+            console.warn(`[cron] job "${name}" completed late (after timeout) in ${Date.now() - start}ms — ignored`);
+          }
         });
     },
     { timezone: "America/Los_Angeles" },
