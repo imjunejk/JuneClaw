@@ -104,8 +104,9 @@ is_healthy() {
   kill -0 "$pid" 2>/dev/null
 }
 
-# ── Hang detection (heartbeat staleness) ─────────────────────────────────
+# ── Hang detection (heartbeat staleness + loop liveness) ─────────────────
 HANG_THRESHOLD_SECS=1200  # 20 min — heartbeat runs every 10 min, so 2 missed = hung
+LOOP_HANG_THRESHOLD_SECS=120  # 2 min — main loop runs every 2s, so 120s = definitely stuck
 STATE_JSON="$JUNECLAW_HOME/state.json"
 
 is_hung() {
@@ -114,28 +115,49 @@ is_hung() {
 
   [[ -f "$STATE_JSON" ]] || return 1
 
-  local last_hb
-  last_hb=$(python3 -c "
+  local timestamps
+  timestamps=$(python3 -c "
 import json, sys
 from datetime import datetime, timezone
 try:
     s = json.load(open('$STATE_JSON'))
+    # Check lastLoopAt first (updated every 2s), then heartbeat, then startedAt
+    loop_at = s.get('lastLoopAt')
     hb = s.get('lastHeartbeatAt')
-    if not hb:
-        # No heartbeat yet — check startedAt instead
-        started = s.get('startedAt', '')
-        if not started:
-            sys.exit(1)
-        dt = datetime.fromisoformat(started.replace('Z', '+00:00'))
-        print(int(dt.timestamp()))
-    else:
-        dt = datetime.fromisoformat(hb.replace('Z', '+00:00'))
-        print(int(dt.timestamp()))
+    started = s.get('startedAt', '')
+    def to_ts(iso):
+        if not iso: return 0
+        dt = datetime.fromisoformat(iso.replace('Z', '+00:00'))
+        return int(dt.timestamp())
+    print(f'{to_ts(loop_at)} {to_ts(hb)} {to_ts(started)}')
 except Exception:
     sys.exit(1)
 " 2>/dev/null) || return 1
 
-  local elapsed=$(( NOW - last_hb ))
+  local loop_ts hb_ts started_ts
+  read loop_ts hb_ts started_ts <<< "$timestamps"
+
+  # Fast detection: main loop liveness (2-minute threshold)
+  if [[ "$loop_ts" -gt 0 ]]; then
+    local loop_elapsed=$(( NOW - loop_ts ))
+    if [[ "$loop_elapsed" -gt "$LOOP_HANG_THRESHOLD_SECS" ]]; then
+      HUNG_SECS=$loop_elapsed
+      return 0
+    fi
+    # Loop is alive — not hung
+    return 1
+  fi
+
+  # Fallback: heartbeat staleness (20-minute threshold)
+  local ref_ts=$hb_ts
+  if [[ "$ref_ts" -eq 0 ]]; then
+    ref_ts=$started_ts
+  fi
+  if [[ "$ref_ts" -eq 0 ]]; then
+    return 1
+  fi
+
+  local elapsed=$(( NOW - ref_ts ))
   if [[ "$elapsed" -gt "$HANG_THRESHOLD_SECS" ]]; then
     HUNG_SECS=$elapsed
     return 0

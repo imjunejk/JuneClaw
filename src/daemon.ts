@@ -54,6 +54,7 @@ interface DaemonState {
   pid: number;
   startedAt: string;
   lastHeartbeatAt: string | null;
+  lastLoopAt: string | null;
   channels: Record<string, { sessionId: string | null; quiet: boolean }>;
 }
 
@@ -61,6 +62,7 @@ const state: DaemonState = {
   pid: process.pid,
   startedAt: new Date().toISOString(),
   lastHeartbeatAt: null,
+  lastLoopAt: null,
   channels: {},
 };
 
@@ -609,6 +611,10 @@ export async function startDaemon(): Promise<void> {
 
   // Main poll loop
   while (true) {
+    // Update liveness timestamp every loop iteration (independent of heartbeat)
+    state.lastLoopAt = new Date().toISOString();
+    saveState().catch(() => {});
+
     try {
       const messages = await channel.pollNewMessages();
 

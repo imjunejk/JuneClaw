@@ -71,15 +71,17 @@ check_once() {
   fi
 
   local started_at agent_name task_type preview PHONE
-  eval $(python3 -c "
-import json
+  local json_out
+  json_out=$(python3 -c "
+import json, shlex
 s = json.load(open('$STATE_FILE'))
 print(f\"started_at={s['startedAt']}\")
-print(f\"agent_name={s['agentName']}\")
+print(f\"agent_name={shlex.quote(s['agentName'])}\")
 print(f\"task_type={s['taskType']}\")
-print(f\"preview={s['messagePreview']}\")
+print(f\"preview={shlex.quote(s['messagePreview'])}\")
 print(f\"PHONE={s.get('phone', '')}\")
 " 2>/dev/null) || return 0
+  eval "$json_out" || return 0
 
   local now_ms
   now_ms=$(python3 -c "import time; print(int(time.time() * 1000))")
