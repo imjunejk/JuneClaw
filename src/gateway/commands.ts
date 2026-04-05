@@ -129,7 +129,7 @@ async function bypassCommand(): Promise<string> {
   try {
     await execFileAsync("tmux", [
       "new-session", "-d", "-s", sessionName,
-      "-c", "/Users/jp/projects/clawd",
+      "-c", config.projectDir,
       "claude", "--dangerously-skip-permissions",
     ]);
     return `bypass 세션 생성 완료: tmux attach -t ${sessionName}`;

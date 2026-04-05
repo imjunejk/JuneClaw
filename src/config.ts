@@ -4,6 +4,7 @@ import { join } from "node:path";
 const home = homedir();
 
 export const config = {
+  projectDir: process.env.JUNECLAW_PROJECT_DIR ?? join(home, "projects", "clawd"),
   workspace: process.env.JUNECLAW_WORKSPACE ?? join(home, "openclaw"),
   channels: {
     june: {
