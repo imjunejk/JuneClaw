@@ -1,10 +1,14 @@
 import { readFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { config } from "../config.js";
 import { getSessionId, clearSessionId } from "../agent/session.js";
 import { buildSystemPrompt } from "../memory/loader.js";
 import { listJobs } from "../scheduler/cron.js";
 import { listAgentStatus, cascadeKill } from "../agent/subagents.js";
 import { writeHandoff } from "../memory/handoff.js";
+
+const execFileAsync = promisify(execFile);
 
 export interface CommandResult {
   handled: boolean;
@@ -47,6 +51,12 @@ export async function handleCommand(
 
     case "/agents":
       return { handled: true, response: await agentsCommand(args) };
+
+    case "/bypass":
+      return { handled: true, response: await bypassCommand() };
+
+    case "/model":
+      return { handled: true, response: modelCommand() };
 
     default:
       return { handled: false };
@@ -105,6 +115,37 @@ async function cronCommand(args: string[]): Promise<string> {
   }
 
   return "Usage: /cron [list]";
+}
+
+async function bypassCommand(): Promise<string> {
+  const sessionName = "claude-bypass";
+  try {
+    await execFileAsync("tmux", ["has-session", "-t", sessionName]);
+    return `bypass 세션 이미 실행 중: tmux attach -t ${sessionName}`;
+  } catch {
+    // Session doesn't exist, create it
+  }
+
+  try {
+    await execFileAsync("tmux", [
+      "new-session", "-d", "-s", sessionName,
+      "-c", "/Users/jp/projects/clawd",
+      "claude", "--dangerously-skip-permissions",
+    ]);
+    return `bypass 세션 생성 완료: tmux attach -t ${sessionName}`;
+  } catch (err) {
+    return `bypass 세션 생성 실패: ${err instanceof Error ? err.message : String(err)}`;
+  }
+}
+
+function modelCommand(): string {
+  const { modelRouting } = config.claude;
+  return [
+    "--- Model Routing ---",
+    `Default: ${modelRouting.defaultModel}`,
+    `Coding:  ${modelRouting.codingModel}`,
+    `Override (env): ${config.claude.model ?? "none"}`,
+  ].join("\n");
 }
 
 async function agentsCommand(args: string[]): Promise<string> {

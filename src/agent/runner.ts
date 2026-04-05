@@ -100,6 +100,7 @@ export async function runClaude(opts: {
   prompt: string;
   systemPrompt: string;
   sessionId?: string;
+  model?: string;
 }): Promise<RunResult> {
   // Write system prompt to temp file to avoid arg length / null byte issues
   const promptDir = join(tmpdir(), "juneclaw");
@@ -123,8 +124,9 @@ export async function runClaude(opts: {
     args.push("--resume", opts.sessionId);
   }
 
-  if (config.claude.model) {
-    args.push("--model", config.claude.model);
+  const model = opts.model ?? config.claude.model;
+  if (model) {
+    args.push("--model", model);
   }
 
   const attempt = async (): Promise<RunResult> => {

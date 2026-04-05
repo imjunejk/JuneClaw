@@ -30,6 +30,10 @@ export const config = {
     ],
     timeoutMs: 600_000,
     model: process.env.JUNECLAW_MODEL,
+    modelRouting: {
+      defaultModel: process.env.JUNECLAW_DEFAULT_MODEL ?? "claude-sonnet-4-6",
+      codingModel: process.env.JUNECLAW_CODING_MODEL ?? "claude-opus-4-6",
+    },
   },
   poll: {
     intervalMs: 2000,

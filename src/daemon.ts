@@ -8,6 +8,7 @@ import { config, type ChannelConfig } from "./config.js";
 import { createIMessageChannel } from "./gateway/imessage.js";
 import { handleCommand } from "./gateway/commands.js";
 import { runClaude } from "./agent/runner.js";
+import { classifyTask, getModelForTask } from "./agent/classifier.js";
 import { getSessionId, setSessionId, clearSessionId } from "./agent/session.js";
 import { buildSystemPrompt } from "./memory/loader.js";
 import { appendDailyLog, appendSystemLog } from "./memory/writer.js";
@@ -241,11 +242,16 @@ async function processMessage(
   const systemPrompt = await buildSystemPrompt("imessage", name);
   const sessionId = await getSessionId(phone);
 
+  const taskType = classifyTask(text);
+  const model = getModelForTask(taskType);
+  log(`[classify] ${taskType} → ${model}`);
+
   try {
     const result = await runClaude({
       prompt: text,
       systemPrompt,
       sessionId,
+      model,
     });
 
     recordSuccess(phone);
