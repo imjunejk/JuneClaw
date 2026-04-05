@@ -6,8 +6,21 @@ import { config, type TaskType } from "../config.js";
 
 const execFileAsync = promisify(execFile);
 
-function truncate(text: string, maxChars: number): string {
+/**
+ * Truncate `text` to `maxChars`, keeping either the head (default) or the
+ * tail. For append-only logs like the daily journal, `"tail"` keeps the
+ * most recent content — with `"head"` the loader was showing the oldest
+ * entries of the day and dropping the most relevant recent activity.
+ */
+function truncate(
+  text: string,
+  maxChars: number,
+  from: "head" | "tail" = "head",
+): string {
   if (text.length <= maxChars) return text;
+  if (from === "tail") {
+    return "...[earlier entries truncated]\n" + text.slice(text.length - maxChars);
+  }
   return text.slice(0, maxChars) + "\n...[truncated]";
 }
 
@@ -42,6 +55,14 @@ interface FileSpec {
   path: string;
   maxChars: number;
   deleteAfterLoad?: boolean;
+  /**
+   * Which end of the file to keep when truncation is needed. Default
+   * `"head"` matches the original behavior for static files (SOUL,
+   * IDENTITY, master-rules, etc.) where the top of the file is the most
+   * important. `"tail"` is for append-only logs (daily journal) where
+   * the most recent entries carry the most signal.
+   */
+  truncateFrom?: "head" | "tail";
 }
 
 interface ImsgHistoryMessage {
@@ -146,11 +167,13 @@ export async function buildSystemPrompt(
       label: `DAILY (${formatDate(today)})`,
       path: join(ws, "memory", "daily", `${formatDate(today)}.md`),
       maxChars: 8000,
+      truncateFrom: "tail",
     },
     {
       label: `DAILY (${formatDate(yesterday)})`,
       path: join(ws, "memory", "daily", `${formatDate(yesterday)}.md`),
       maxChars: 4000,
+      truncateFrom: "tail",
     },
     {
       label: "HANDOFF",
@@ -179,13 +202,13 @@ export async function buildSystemPrompt(
   }));
 
   const sections: string[] = [];
-  for (const { label, path, maxChars, deleteAfterLoad } of [
+  for (const { label, path, maxChars, deleteAfterLoad, truncateFrom } of [
     ...files,
     ...strategyFiles,
   ]) {
     const content = await loadFileOrNull(path);
     if (content) {
-      sections.push(`## ${label}\n${truncate(content.trim(), maxChars)}`);
+      sections.push(`## ${label}\n${truncate(content.trim(), maxChars, truncateFrom)}`);
       if (deleteAfterLoad) {
         try {
           await unlink(path);
