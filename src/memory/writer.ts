@@ -30,16 +30,21 @@ function formatTime(date: Date): string {
 }
 
 /**
- * Truncate a message to maxChars, appending a `…(+N more chars)` indicator
- * if anything was cut. Collapses whitespace so multi-line messages don't
- * stretch the journal vertically.
+ * Truncate a message to roughly maxChars code points, appending a
+ * `…(+N more)` indicator if anything was cut. Collapses whitespace first
+ * so multi-line messages don't stretch the journal vertically.
+ *
+ * Note: uses code-point splitting (via `[...str]`) rather than `slice()`
+ * so an emoji or other supplementary-plane character never gets cut in
+ * the middle of its surrogate pair.
  */
 function truncateForJournal(text: string, maxChars: number): string {
   const collapsed = text.replace(/\s+/g, " ").trim();
-  if (collapsed.length <= maxChars) return collapsed;
-  const kept = collapsed.slice(0, maxChars);
-  const extra = collapsed.length - maxChars;
-  return `${kept}…(+${extra} more chars)`;
+  const codePoints = [...collapsed];
+  if (codePoints.length <= maxChars) return collapsed;
+  const kept = codePoints.slice(0, maxChars).join("");
+  const extra = codePoints.length - maxChars;
+  return `${kept}…(+${extra} more)`;
 }
 
 export async function appendDailyLog(
