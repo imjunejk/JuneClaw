@@ -90,17 +90,18 @@ export class WorkerPool {
     if (this.activeWorkers.size === 0) return;
 
     return new Promise<void>((resolve) => {
+      const drainResolver = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+
       const timer = setTimeout(() => {
-        // Remove this resolver and resolve anyway
-        const idx = this.drainResolvers.indexOf(resolve);
+        const idx = this.drainResolvers.indexOf(drainResolver);
         if (idx >= 0) this.drainResolvers.splice(idx, 1);
         resolve();
       }, timeoutMs);
 
-      this.drainResolvers.push(() => {
-        clearTimeout(timer);
-        resolve();
-      });
+      this.drainResolvers.push(drainResolver);
     });
   }
 

@@ -91,6 +91,9 @@ const messageQueue = new DurableQueue<QueuedMessage>({
   maxCompleted: 50,
 });
 
+// Priority prefix for queue ordering (filenames sort lexicographically)
+const taskPriority: Record<TaskType, number> = { coding: 0, research: 1, general: 2, quick: 3 };
+
 // Track which phones have an active heavy worker to prevent session conflicts
 const activePhones = new Set<string>();
 
@@ -742,12 +745,14 @@ export async function startDaemon(): Promise<void> {
         }
 
         // Heavy lane: enqueue to durable queue (never drops)
+        // Priority prefix ensures coding (0) sorts before research (1) before general (2)
+        const priority = taskPriority[taskType] ?? 2;
         const queueId = await messageQueue.enqueue({
           text: msg.text,
           taskType,
           phone: ch.phone,
           enqueuedAt: Date.now(),
-        }, `${msg.id}-${Date.now()}`);
+        }, `${priority}-${msg.id}-${Date.now()}`);
         const pending = await messageQueue.pendingCount();
         log(`[queue] enqueued ${queueId} (${taskType}), ${pending} pending`);
       }
@@ -786,9 +791,9 @@ export async function startDaemon(): Promise<void> {
         // Per-phone serialization: skip if this phone already has an active worker
         // to prevent session/context conflicts from concurrent Claude CLI calls
         if (activePhones.has(phone)) {
-          // Put it back — will be picked up next poll cycle
-          await messageQueue.fail(task.id);
-          break;
+          // Release back to pending without incrementing retryCount
+          await messageQueue.release(task.id);
+          continue;
         }
 
         log(`[pool] dispatching ${task.id} (${tt}): ${text.slice(0, 60)}...`);

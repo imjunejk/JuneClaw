@@ -116,6 +116,24 @@ export class DurableQueue<T = unknown> {
     await this.pruneCompleted();
   }
 
+  /** Release a claimed item back to pending without incrementing retryCount.
+   *  Use this for scheduling conflicts (e.g. phone busy), not actual failures. */
+  async release(id: string): Promise<void> {
+    const src = join(this.dirs.processing, `${id}.json`);
+    const dst = join(this.dirs.pending, `${id}.json`);
+    try {
+      const raw = await readFile(src, "utf-8");
+      const item = JSON.parse(raw) as QueueItem<T>;
+      item.workerPid = undefined;
+      await atomicWriteJson(dst, item);
+      await unlink(src).catch(() => {});
+    } catch (err: any) {
+      // If file is gone, nothing to release
+      if (err.code === "ENOENT") return;
+      throw err;
+    }
+  }
+
   /** Mark a claimed item as failed. Retries or moves to dead letter queue. */
   async fail(id: string, error?: string): Promise<"retried" | "dead"> {
     const path = join(this.dirs.processing, `${id}.json`);
