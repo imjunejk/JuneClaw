@@ -101,6 +101,7 @@ function spawnClaudePrint(prompt: string): Promise<string> {
     const args = [
       "--print",
       "--model", config.dream.model,
+      "--permission-mode", config.claude.permissionMode,
     ];
 
     const child = spawn(config.claude.bin, args, {
