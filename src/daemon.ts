@@ -222,13 +222,17 @@ function startRemoteControl(): void {
   }
 
   remoteControlStopped = false;
+  // dist/daemon.js → go up one level to project root (/Users/jp/JuneClaw/)
+  const rcCwd = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
   remoteControlProcess = spawn(config.claude.bin, [
     "remote-control",
-    "--permission-mode", config.claude.permissionMode,
+    "--dangerously-skip-permissions",
     "--name", config.remoteControl.name,
   ], {
     stdio: ["ignore", "pipe", "pipe"],
     detached: false,
+    cwd: rcCwd,
+    env: { ...process.env },
   });
 
   remoteControlProcess.stdout?.on("data", (chunk: Buffer) => {
