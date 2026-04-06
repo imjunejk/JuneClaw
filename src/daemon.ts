@@ -75,6 +75,8 @@ const btwQueue: string[] = [];
 const pendingMessages: { text: string; taskType: TaskType }[] = [];
 let monitorProcess: ChildProcess | null = null;
 let monitorStopped = false;
+let remoteControlProcess: ChildProcess | null = null;
+let remoteControlStopped = false;
 
 interface ProgressState {
   startedAt: number;
@@ -178,6 +180,74 @@ function stopProgressMonitor(): void {
     monitorProcess.kill("SIGTERM");
     monitorProcess = null;
     log("[monitor] stopped");
+  }
+}
+
+function startRemoteControl(): void {
+  if (!config.remoteControl.enabled) {
+    log("[remote-control] disabled via config");
+    return;
+  }
+
+  remoteControlStopped = false;
+  remoteControlProcess = spawn(config.claude.bin, [
+    "remote-control",
+    "--permission-mode", config.claude.permissionMode,
+    "--name", config.remoteControl.name,
+  ], {
+    stdio: ["ignore", "pipe", "pipe"],
+    detached: false,
+  });
+
+  remoteControlProcess.stdout?.on("data", (chunk: Buffer) => {
+    const line = chunk.toString().trim();
+    if (line) log(`[remote-control] ${line}`);
+  });
+
+  remoteControlProcess.stderr?.on("data", (chunk: Buffer) => {
+    const line = chunk.toString().trim();
+    if (line) log(`[remote-control:err] ${line}`);
+  });
+
+  remoteControlProcess.on("error", (err) => {
+    log(`[remote-control] spawn error: ${err.message}`);
+    remoteControlProcess = null;
+    if (!remoteControlStopped) {
+      setTimeout(() => {
+        if (!remoteControlStopped && remoteControlProcess === null) {
+          log("[remote-control] retrying after spawn error...");
+          startRemoteControl();
+        }
+      }, config.remoteControl.respawnDelayMs);
+    }
+  });
+
+  remoteControlProcess.on("exit", (code) => {
+    log(`[remote-control] exited with code ${code}`);
+    remoteControlProcess = null;
+    if (!remoteControlStopped) {
+      setTimeout(() => {
+        if (!remoteControlStopped && remoteControlProcess === null) {
+          log("[remote-control] respawning after exit...");
+          startRemoteControl();
+        }
+      }, config.remoteControl.respawnDelayMs);
+    }
+  });
+
+  log(`[remote-control] started (PID ${remoteControlProcess.pid})`);
+}
+
+function stopRemoteControl(): void {
+  remoteControlStopped = true;
+  if (remoteControlProcess) {
+    const proc = remoteControlProcess;
+    remoteControlProcess = null;
+    proc.kill("SIGTERM");
+    setTimeout(() => {
+      try { proc.kill("SIGKILL"); } catch { /* already dead */ }
+    }, 5_000);
+    log("[remote-control] stopped");
   }
 }
 
@@ -616,6 +686,9 @@ export async function startDaemon(): Promise<void> {
   // Start external progress monitor (background shell script)
   startProgressMonitor();
 
+  // Start Claude remote-control so June can connect via claude.ai/code
+  startRemoteControl();
+
   // Notify June that daemon has started
   await channel.sendMessage("JuneClaw restarted").catch((err) => {
     log(`[startup] failed to send restart notification: ${err instanceof Error ? err.message : String(err)}`);
@@ -627,6 +700,7 @@ export async function startDaemon(): Promise<void> {
     shuttingDown = true;
     log(`Received ${signal}, shutting down...`);
     await emit("daemon:shutdown", { signal });
+    stopRemoteControl();
     stopProgressMonitor();
     stopAllCron();
 
