@@ -60,7 +60,7 @@ send_progress() {
   fi
 
   # Check for active sub-agents via agent-lifecycle
-  local lifecycle_script="$HOME/openclaw/tools/agent-lifecycle.sh"
+  local lifecycle_script="$HOME/.juneclaw/workspace/tools/agent-lifecycle.sh"
   if [ -x "$lifecycle_script" ]; then
     local agents
     agents=$("$lifecycle_script" status 2>/dev/null | grep -c "running" || true)

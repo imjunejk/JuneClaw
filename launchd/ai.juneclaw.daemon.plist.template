@@ -12,7 +12,7 @@
   <key>EnvironmentVariables</key>
   <dict>
     <key>JUNECLAW_WORKSPACE</key>
-    <string>HOME_PATH/openclaw</string>
+    <string>HOME_PATH/.juneclaw/workspace</string>
     <key>PATH</key>
     <string>/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin:HOME_PATH/.local/bin</string>
   </dict>
