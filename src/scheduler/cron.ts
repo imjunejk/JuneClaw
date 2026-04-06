@@ -1,5 +1,9 @@
 import cron from "node-cron";
 import { config } from "../config.js";
+import {
+  CircuitBreaker,
+  CircuitBreakerOpenError,
+} from "../lib/circuit-breaker.js";
 
 export interface CronJob {
   name: string;
@@ -10,6 +14,22 @@ export interface CronJob {
 
 const jobs = new Map<string, CronJob>();
 const executing = new Set<string>();
+const jobBreakers = new Map<string, CircuitBreaker>();
+
+/** Get or create a circuit breaker for a cron job. */
+function breakerForJob(name: string): CircuitBreaker {
+  let cb = jobBreakers.get(name);
+  if (!cb) {
+    cb = new CircuitBreaker({
+      failureThreshold: 3,
+      recoveryTimeoutMs: 60_000,
+      onStateChange: (from, to) =>
+        console.log(`[cron][circuit-breaker] job="${name}" ${from} -> ${to}`),
+    });
+    jobBreakers.set(name, cb);
+  }
+  return cb;
+}
 
 /** Default max execution time per cron job (10 minutes). */
 const DEFAULT_TIMEOUT_MS = 10 * 60_000;
@@ -36,9 +56,17 @@ export function addJob(
 
   const timeoutMs = JOB_TIMEOUTS[name] ?? DEFAULT_TIMEOUT_MS;
 
+  const breaker = breakerForJob(name);
+
   const task = cron.schedule(
     schedule,
     () => {
+      // Circuit breaker guard: skip if breaker is OPEN
+      if (breaker.state === "OPEN") {
+        console.warn(`[cron] job "${name}" circuit breaker OPEN — skipping until recovery`);
+        return;
+      }
+
       // Concurrency guard: skip if already executing
       if (executing.has(name)) {
         console.warn(`[cron] job "${name}" still running — skipping this invocation`);
@@ -54,9 +82,10 @@ export function addJob(
         executing.delete(name);
       }, timeoutMs);
 
-      Promise.resolve(callback())
+      breaker
+        .execute(() => Promise.resolve(callback()))
         .catch((err) => {
-          if (!timedOut) {
+          if (!timedOut && !(err instanceof CircuitBreakerOpenError)) {
             console.error(`[cron] job "${name}" failed:`, err);
           }
         })
