@@ -791,9 +791,11 @@ export async function startDaemon(): Promise<void> {
         // Per-phone serialization: skip if this phone already has an active worker
         // to prevent session/context conflicts from concurrent Claude CLI calls
         if (activePhones.has(phone)) {
-          // Release back to pending without incrementing retryCount
+          // Release back to pending without incrementing retryCount.
+          // Break (not continue) — same file would be re-claimed in a busy loop.
+          // Next poll cycle (2s) will retry.
           await messageQueue.release(task.id);
-          continue;
+          break;
         }
 
         log(`[pool] dispatching ${task.id} (${tt}): ${text.slice(0, 60)}...`);
