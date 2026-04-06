@@ -4,6 +4,34 @@ import { writeFile, unlink, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { config, type TaskType } from "../config.js";
+import {
+  CircuitBreaker,
+  CircuitBreakerOpenError,
+} from "../lib/circuit-breaker.js";
+
+// ---------------------------------------------------------------------------
+// Per-model circuit breakers — shared across calls for the process lifetime.
+// ---------------------------------------------------------------------------
+const modelBreakers = new Map<string, CircuitBreaker>();
+
+const FALLBACK_MODEL = "claude-sonnet-4-6";
+
+function breakerFor(model: string): CircuitBreaker {
+  let cb = modelBreakers.get(model);
+  if (!cb) {
+    cb = new CircuitBreaker({
+      failureThreshold: 3,
+      recoveryTimeoutMs: 60_000,
+      onStateChange: (from, to) =>
+        console.log(`[circuit-breaker] model="${model}" ${from} -> ${to}`),
+    });
+    modelBreakers.set(model, cb);
+  }
+  return cb;
+}
+
+/** Expose breaker map for external inspection (e.g. health checks). */
+export { modelBreakers };
 
 interface ClaudeUsage {
   input_tokens: number;
@@ -112,32 +140,35 @@ export async function runClaude(opts: {
   const promptFile = join(promptDir, `sysprompt-${randomUUID()}.md`);
   await writeFile(promptFile, opts.systemPrompt, "utf-8");
 
-  const args = [
-    "--print",
-    "--permission-mode",
-    config.claude.permissionMode,
-    "--output-format",
-    "json",
-    "--append-system-prompt-file",
-    promptFile,
-    "--allowedTools",
-    config.claude.allowedTools.join(" "),
-  ];
-
-  if (opts.sessionId) {
-    args.push("--resume", opts.sessionId);
-  }
-
   // Model priority: explicit opts.model > taskType routing > global override > (none)
-  const model = opts.model
+  const primaryModel = opts.model
     ?? (opts.taskType ? config.claude.modelRouting[opts.taskType] : undefined)
     ?? config.claude.model;
-  if (model) {
-    args.push("--model", model);
-  }
 
-  const attempt = async (): Promise<RunResult> => {
-    const raw = await spawnClaude(args, opts.prompt);
+  const buildArgs = (model: string | undefined): string[] => {
+    const args = [
+      "--print",
+      "--permission-mode",
+      config.claude.permissionMode,
+      "--output-format",
+      "json",
+      "--append-system-prompt-file",
+      promptFile,
+      "--allowedTools",
+      config.claude.allowedTools.join(" "),
+    ];
+
+    if (opts.sessionId) {
+      args.push("--resume", opts.sessionId);
+    }
+
+    if (model) {
+      args.push("--model", model);
+    }
+    return args;
+  };
+
+  const parseOutput = (raw: string): RunResult => {
     let parsed: ClaudeJsonOutput;
     try {
       parsed = JSON.parse(raw.trim());
@@ -157,7 +188,6 @@ export async function runClaude(opts: {
     let usage: UsageInfo | undefined;
     const modelEntry = Object.values(parsed.modelUsage ?? {})[0];
     if (modelEntry) {
-      // Context usage = input tokens only (output tokens don't consume context window)
       const contextTokens =
         modelEntry.inputTokens +
         modelEntry.cacheReadInputTokens +
@@ -203,13 +233,59 @@ export async function runClaude(opts: {
     };
   };
 
-  try {
-    return await attempt();
-  } catch (err) {
-    if (err instanceof Error && err.message.startsWith("TIMEOUT")) {
-      return await attempt();
+  /** One attempt with built-in TIMEOUT retry (preserving existing behaviour). */
+  const attemptWithRetry = async (model: string | undefined): Promise<RunResult> => {
+    const args = buildArgs(model);
+    const run = async (): Promise<RunResult> => {
+      const raw = await spawnClaude(args, opts.prompt);
+      return parseOutput(raw);
+    };
+
+    try {
+      return await run();
+    } catch (err) {
+      if (err instanceof Error && err.message.startsWith("TIMEOUT")) {
+        return await run(); // single retry on timeout
+      }
+      throw err;
     }
-    throw err;
+  };
+
+  try {
+    // --- Circuit-breaker-guarded execution with model fallback ---
+    // Build a fallback chain: primary model, then FALLBACK_MODEL (if different).
+    const models: string[] = [];
+    if (primaryModel) models.push(primaryModel);
+    if (primaryModel !== FALLBACK_MODEL) models.push(FALLBACK_MODEL);
+    // If no models resolved (no env vars set, no routing), run without --model flag.
+    if (models.length === 0) models.push("");
+
+    let lastError: unknown;
+    for (const model of models) {
+      const breaker = model ? breakerFor(model) : breakerFor("__default__");
+      try {
+        return await breaker.execute(() => attemptWithRetry(model || undefined));
+      } catch (err) {
+        lastError = err;
+        if (err instanceof CircuitBreakerOpenError) {
+          console.warn(
+            `[runner] circuit breaker OPEN for model="${model || "default"}", trying next in fallback chain`,
+          );
+          continue; // try next model
+        }
+        // Real execution error — the breaker already recorded the failure.
+        // If there's a fallback model left, try it.
+        if (model !== models[models.length - 1]) {
+          console.warn(
+            `[runner] model="${model}" failed, falling back: ${err instanceof Error ? err.message : err}`,
+          );
+          continue;
+        }
+        throw err;
+      }
+    }
+    // All models exhausted
+    throw lastError;
   } finally {
     // Clean up temp file
     unlink(promptFile).catch(() => {});
