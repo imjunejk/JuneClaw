@@ -233,7 +233,7 @@ function startRemoteControl(): void {
   const rcCwd = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
   remoteControlProcess = spawn(config.claude.bin, [
     "remote-control",
-    "--dangerously-skip-permissions",
+    "--permission-mode", config.claude.permissionMode,
     "--name", config.remoteControl.name,
   ], {
     stdio: ["ignore", "pipe", "pipe"],
