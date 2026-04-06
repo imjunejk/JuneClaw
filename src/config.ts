@@ -48,6 +48,12 @@ export const config = {
       classifier: process.env.JUNECLAW_CLASSIFIER_MODEL ?? "claude-sonnet-4-6",
     } satisfies Record<TaskType | "classifier", string>,
   },
+  dream: {
+    minHoursSinceLast: 24,
+    minSessionsSinceLast: 5,
+    model: "claude-sonnet-4-6",
+    timeoutMs: 120_000,
+  },
   poll: {
     intervalMs: 2000,
     heartbeatIntervalMs: 10 * 60 * 1000,
@@ -81,6 +87,7 @@ export const config = {
     statePath: join(home, ".juneclaw", "state.json"),
     pidFile: join(home, ".juneclaw", "daemon.pid"),
     watchdogState: join(home, ".juneclaw", "watchdog-state.txt"),
+    dreamState: join(home, ".juneclaw", "dream-state.json"),
   },
   subAgents: {
     maxConcurrent: 5,

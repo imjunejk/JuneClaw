@@ -38,6 +38,12 @@ import {
   runWeeklyCompression,
   runMonthlyCompression,
 } from "./memory/consolidation.js";
+import {
+  incrementSessionCount,
+  loadDreamState,
+  shouldDream,
+  runDream,
+} from "./memory/dream.js";
 import { DurableQueue } from "./lib/durable-queue.js";
 import { WorkerPool } from "./lib/worker-pool.js";
 import { atomicWriteFile } from "./lib/atomic-file.js";
@@ -645,6 +651,17 @@ async function runHeartbeat(
     await logFromError(err, "heartbeat");
     await emit("heartbeat:failed", { error: String(err) });
   }
+
+  // autoDream: check if memory consolidation should run
+  try {
+    const dreamState = await loadDreamState();
+    if (shouldDream(dreamState)) {
+      log("[dream] trigger conditions met, starting autoDream...");
+      await runDream();
+    }
+  } catch (err) {
+    logError("[dream] autoDream failed", err);
+  }
 }
 
 function initCronScheduler(channel: Channel, channelConfig: ChannelConfig): void {
@@ -848,6 +865,7 @@ export async function startDaemon(): Promise<void> {
             try {
               await writeProgressState("general", followUp, ch.phone);
               await withProcessingLiveness(() => processMessage(channel, ch, followUp, "general"));
+              await incrementSessionCount();
             } catch (err) {
               logError("Failed to process /btw follow-up", err);
             } finally {
@@ -885,6 +903,7 @@ export async function startDaemon(): Promise<void> {
               await writeProgressState(tt, text, phone);
               await withProcessingLiveness(() => processMessage(channel, ch, text, tt));
               await messageQueue.complete(task.id);
+              await incrementSessionCount();
             } catch (err) {
               logError(`Failed to process ${task.id}`, err);
               const disposition = await messageQueue.fail(
