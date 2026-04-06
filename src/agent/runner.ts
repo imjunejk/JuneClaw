@@ -100,12 +100,6 @@ function spawnClaude(args: string[], prompt: string): Promise<string> {
   });
 }
 
-// ── Static prompt file cache ─────────────────────────────────
-// Reuse the same file for identical static prompts across calls.
-// Claude API caches by byte-identical prefix, so reusing the same
-// file content maximizes prompt cache hits.
-const staticPromptCache = new Map<string, { hash: string; path: string }>();
-
 export async function runClaude(opts: {
   prompt: string;
   systemPrompt: string;
