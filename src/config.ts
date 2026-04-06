@@ -139,7 +139,16 @@ export const config = {
       heartbeat: "*/10 * * * *",
       weeklyCompression: "0 1 * * 1",
       monthlyCompression: "0 2 1 * *",
+      failureClassification: "0 3 * * *", // daily at 3am
     } as Record<string, string>,
+  },
+  strategyTuner: {
+    /** Minimum exchanges under a new strategy before evaluating keep/discard. */
+    minEvalExchanges: 10,
+    /** Minimum score delta to consider a strategy "improved". */
+    scoreImprovementThreshold: 0.02,
+    /** Don't tune task types with avg score above this. */
+    tuneScoreCeiling: 0.75,
   },
 };
 
