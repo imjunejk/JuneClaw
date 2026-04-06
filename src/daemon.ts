@@ -183,6 +183,19 @@ function startRemoteControl(): void {
     if (line) log(`[remote-control:err] ${line}`);
   });
 
+  remoteControlProcess.on("error", (err) => {
+    log(`[remote-control] spawn error: ${err.message}`);
+    remoteControlProcess = null;
+    if (!remoteControlStopped) {
+      setTimeout(() => {
+        if (!remoteControlStopped && remoteControlProcess === null) {
+          log("[remote-control] retrying after spawn error...");
+          startRemoteControl();
+        }
+      }, config.remoteControl.respawnDelayMs);
+    }
+  });
+
   remoteControlProcess.on("exit", (code) => {
     log(`[remote-control] exited with code ${code}`);
     remoteControlProcess = null;
@@ -202,8 +215,12 @@ function startRemoteControl(): void {
 function stopRemoteControl(): void {
   remoteControlStopped = true;
   if (remoteControlProcess) {
-    remoteControlProcess.kill("SIGTERM");
+    const proc = remoteControlProcess;
     remoteControlProcess = null;
+    proc.kill("SIGTERM");
+    setTimeout(() => {
+      try { proc.kill("SIGKILL"); } catch { /* already dead */ }
+    }, 5_000);
     log("[remote-control] stopped");
   }
 }
