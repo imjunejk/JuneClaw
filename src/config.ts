@@ -49,7 +49,7 @@ export const config = {
   },
   progress: {
     firstDelayMs: 15_000,
-    intervalMs: 45_000,
+    intervalMs: 300_000,
     statePath: join(home, ".juneclaw", "progress-state.json"),
     /** Display names for progress notifications per task type */
     agentNames: {
