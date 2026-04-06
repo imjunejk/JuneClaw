@@ -295,6 +295,18 @@ function stopRemoteControl(): void {
 }
 
 async function killDuplicateProcesses(): Promise<void> {
+  // Also kill orphan remote-control processes from previous daemon instances
+  try {
+    const { stdout: rcOut } = await execFileAsync("pgrep", ["-f", "remote-control.*--name.*juneclaw"]);
+    const rcPids = rcOut.trim().split("\n").map(Number).filter(Boolean);
+    for (const pid of rcPids) {
+      log(`Killing orphan remote-control (PID ${pid})`);
+      try { process.kill(pid, "SIGKILL"); } catch { /* already dead */ }
+    }
+  } catch {
+    // No orphan remote-control processes
+  }
+
   try {
     const { stdout } = await execFileAsync("pgrep", ["-f", "JuneClaw/dist/index"]);
     const pids = stdout.trim().split("\n").map(Number).filter((p) => p !== process.pid);
