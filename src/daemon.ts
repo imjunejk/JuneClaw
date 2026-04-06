@@ -295,16 +295,23 @@ function stopRemoteControl(): void {
 }
 
 async function killDuplicateProcesses(): Promise<void> {
-  // Also kill orphan remote-control processes from previous daemon instances
-  try {
-    const { stdout: rcOut } = await execFileAsync("pgrep", ["-f", "remote-control.*--name.*juneclaw"]);
-    const rcPids = rcOut.trim().split("\n").map(Number).filter(Boolean);
-    for (const pid of rcPids) {
-      log(`Killing orphan remote-control (PID ${pid})`);
-      try { process.kill(pid, "SIGKILL"); } catch { /* already dead */ }
+  // Kill orphan child processes from previous daemon instances.
+  // Must run BEFORE startRemoteControl()/startProgressMonitor() so we
+  // never accidentally kill our own children.
+  for (const pattern of [
+    "remote-control.*--name.*juneclaw",
+    "progress-monitor\\.sh",
+  ]) {
+    try {
+      const { stdout } = await execFileAsync("pgrep", ["-f", pattern]);
+      const pids = stdout.trim().split("\n").map(Number).filter(Boolean);
+      for (const pid of pids) {
+        log(`Killing orphan process (PID ${pid}, pattern: ${pattern})`);
+        try { process.kill(pid, "SIGKILL"); } catch { /* already dead */ }
+      }
+    } catch {
+      // No matches — normal
     }
-  } catch {
-    // No orphan remote-control processes
   }
 
   try {
