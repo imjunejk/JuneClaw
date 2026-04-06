@@ -100,6 +100,12 @@ function spawnClaude(args: string[], prompt: string): Promise<string> {
   });
 }
 
+// ── Static prompt file cache ─────────────────────────────────
+// Reuse the same file for identical static prompts across calls.
+// Claude API caches by byte-identical prefix, so reusing the same
+// file content maximizes prompt cache hits.
+const staticPromptCache = new Map<string, { hash: string; path: string }>();
+
 export async function runClaude(opts: {
   prompt: string;
   systemPrompt: string;
@@ -107,7 +113,6 @@ export async function runClaude(opts: {
   model?: string;
   taskType?: TaskType;
 }): Promise<RunResult> {
-  // Write system prompt to temp file to avoid arg length / null byte issues
   const promptDir = join(tmpdir(), "juneclaw");
   await mkdir(promptDir, { recursive: true });
   const promptFile = join(promptDir, `sysprompt-${randomUUID()}.md`);
