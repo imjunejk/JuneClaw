@@ -19,7 +19,7 @@
  *   - Otherwise                  → DISCARD (revert to backup)
  */
 
-import { readFile, readdir, copyFile, mkdir } from "node:fs/promises";
+import { readFile, readdir, copyFile, mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
@@ -62,18 +62,11 @@ const DEFAULT_STATE: TunerState = {
   totalReverts: 0,
 };
 
-const TUNER_STATE_PATH = join(
-  config.workspace,
-  "..",
-  "tuner-state.json",
-);
+const TUNER_STATE_PATH = config.paths.tunerState;
 const STRATEGY_BACKUP_DIR = join(config.workspace, "memory", "strategy-versions");
 
-/** Minimum exchanges under a new strategy before we evaluate keep/discard. */
-const MIN_EVAL_EXCHANGES = 10;
-
-/** Minimum score improvement to keep a new strategy. */
-const SCORE_IMPROVEMENT_THRESHOLD = 0.02;
+/** Maximum backup directories to keep per task type. */
+const MAX_BACKUPS_PER_TASK = 10;
 
 const tunerMutex = new AsyncMutex();
 
@@ -93,7 +86,7 @@ async function saveTunerState(state: TunerState): Promise<void> {
   await atomicWriteJson(TUNER_STATE_PATH, state);
 }
 
-// ── Strategy hashing ─────���──────────────────────────────────────────
+// ── Strategy hashing ────────────────────────────────────────────────
 
 /**
  * Compute a SHA-256 hash of all strategy files for a given task type.
@@ -126,7 +119,7 @@ export async function currentStrategyHash(taskType: TaskType): Promise<string> {
   return hashStrategies(taskType);
 }
 
-// ── Backup / restore ────────��───────────────────────────────────────
+// ── Backup / restore / prune ────────────────────────────────────────
 
 async function backupStrategies(taskType: TaskType, hash: string): Promise<void> {
   const ts = new Date().toISOString().replace(/[:.]/g, "-");
@@ -146,7 +139,6 @@ async function backupStrategies(taskType: TaskType, hash: string): Promise<void>
 }
 
 async function restoreStrategies(taskType: TaskType, hash: string): Promise<boolean> {
-  // Find the backup directory matching this hash
   let dirs: string[];
   try {
     dirs = await readdir(STRATEGY_BACKUP_DIR);
@@ -172,10 +164,32 @@ async function restoreStrategies(taskType: TaskType, hash: string): Promise<bool
   return true;
 }
 
+/** Remove old backup directories, keeping only the most recent N per task type. */
+async function pruneOldBackups(taskType: TaskType): Promise<void> {
+  let dirs: string[];
+  try {
+    dirs = await readdir(STRATEGY_BACKUP_DIR);
+  } catch {
+    return;
+  }
+
+  const matching = dirs.filter((d) => d.startsWith(`${taskType}-`)).sort();
+  const toRemove = matching.slice(0, Math.max(0, matching.length - MAX_BACKUPS_PER_TASK));
+  for (const old of toRemove) {
+    try {
+      await rm(join(STRATEGY_BACKUP_DIR, old), { recursive: true });
+    } catch {
+      // Best-effort cleanup
+    }
+  }
+}
+
 // ── Claude prompt for strategy improvement ──────────────────────────
 
 function spawnClaudePrint(prompt: string): Promise<string> {
   return new Promise((resolve, reject) => {
+    let settled = false;
+
     const args = [
       "--print",
       "--model", config.dream.model,
@@ -197,6 +211,8 @@ function spawnClaudePrint(prompt: string): Promise<string> {
     child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
 
     const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
       child.kill("SIGTERM");
       setTimeout(() => {
         try { child.kill("SIGKILL"); } catch { /* already dead */ }
@@ -206,6 +222,8 @@ function spawnClaudePrint(prompt: string): Promise<string> {
 
     child.on("close", (code) => {
       clearTimeout(timer);
+      if (settled) return;
+      settled = true;
       if (code !== 0) {
         reject(new Error(`strategy-tuner claude exited ${code}: ${stderr.slice(0, 500)}`));
       } else {
@@ -215,12 +233,23 @@ function spawnClaudePrint(prompt: string): Promise<string> {
 
     child.on("error", (err) => {
       clearTimeout(timer);
+      if (settled) return;
+      settled = true;
       reject(err);
     });
   });
 }
 
-// ── Core tuning logic ────────��──────────────────────────────────────
+// ── Core tuning logic ───────────────────────────────────────────────
+
+/**
+ * Derive tunable task types from config (those with non-empty strategy mappings).
+ */
+function tunableTaskTypes(): TaskType[] {
+  return (Object.keys(config.subAgents.strategyMapping) as TaskType[]).filter(
+    (tt) => config.subAgents.strategyMapping[tt].length > 0,
+  );
+}
 
 /**
  * Identify which task type would benefit most from tuning.
@@ -234,7 +263,7 @@ async function findTuningTarget(): Promise<{
   const entries = await readRecentScores(200);
   if (entries.length < 10) return null;
 
-  const taskTypes: TaskType[] = ["coding", "research", "general"];
+  const taskTypes = tunableTaskTypes();
   let worst: { taskType: TaskType; avgScore: number; entries: LedgerEntry[] } | null = null;
 
   for (const tt of taskTypes) {
@@ -256,29 +285,33 @@ async function findTuningTarget(): Promise<{
 export async function runStrategyTuner(): Promise<void> {
   await tunerMutex.run(async () => {
     const state = await loadTunerState();
+    const { minEvalExchanges, scoreImprovementThreshold, tuneScoreCeiling } =
+      config.strategyTuner;
+
+    let justReverted = false;
 
     // ── Phase A: Evaluate previous tuning (keep/discard) ──────────
     if (
       state.currentHash &&
       state.previousHash &&
       state.targetTaskType &&
-      state.exchangesSinceLastTune >= MIN_EVAL_EXCHANGES
+      state.exchangesSinceLastTune >= minEvalExchanges
     ) {
       const oldStats = await averageScoreForStrategy(state.previousHash, state.targetTaskType);
       const newStats = await averageScoreForStrategy(state.currentHash, state.targetTaskType);
 
       if (oldStats && newStats) {
-        const improved = newStats.avg > oldStats.avg + SCORE_IMPROVEMENT_THRESHOLD;
-        const sameScore = Math.abs(newStats.avg - oldStats.avg) <= SCORE_IMPROVEMENT_THRESHOLD;
+        const improved = newStats.avg > oldStats.avg + scoreImprovementThreshold;
+        const sameScore = Math.abs(newStats.avg - oldStats.avg) <= scoreImprovementThreshold;
 
         if (improved) {
           // KEEP — new strategy is better
-          const msg = `[tuner] KEEP strategy for ${state.targetTaskType}: ${oldStats.avg.toFixed(3)} ��� ${newStats.avg.toFixed(3)} (+${(newStats.avg - oldStats.avg).toFixed(3)})`;
+          const msg = `[tuner] KEEP strategy for ${state.targetTaskType}: ${oldStats.avg.toFixed(3)} → ${newStats.avg.toFixed(3)} (+${(newStats.avg - oldStats.avg).toFixed(3)})`;
           console.log(msg);
           await appendSystemLog(msg);
           state.previousHash = state.currentHash;
         } else if (sameScore) {
-          // Same score — keep (simpler check would require token counting, skip for now)
+          // Same score — keep
           const msg = `[tuner] KEEP (same score) for ${state.targetTaskType}: ${oldStats.avg.toFixed(3)} ≈ ${newStats.avg.toFixed(3)}`;
           console.log(msg);
           await appendSystemLog(msg);
@@ -293,6 +326,7 @@ export async function runStrategyTuner(): Promise<void> {
           if (reverted) {
             state.currentHash = state.previousHash;
             state.totalReverts++;
+            justReverted = true;
             await appendSystemLog(`[tuner] reverted ${state.targetTaskType} strategies to ${state.previousHash}`);
           } else {
             await appendSystemLog(`[tuner] WARN: could not find backup for ${state.previousHash}, keeping current`);
@@ -301,28 +335,45 @@ export async function runStrategyTuner(): Promise<void> {
       }
     }
 
+    // After a discard, give the reverted strategy time to accumulate scores
+    // before attempting another tune. This prevents thrashing.
+    if (justReverted) {
+      state.exchangesSinceLastTune = 0;
+      await saveTunerState(state);
+      return;
+    }
+
     // ── Phase B: Identify next tuning target and improve ──────────
     const target = await findTuningTarget();
     if (!target) {
-      // Not enough data yet — skip tuning
       await saveTunerState(state);
       return;
     }
 
     // Skip if the target already has a high average score
-    if (target.avgScore >= 0.75) {
+    if (target.avgScore >= tuneScoreCeiling) {
       await saveTunerState(state);
       return;
     }
 
     const taskType = target.taskType;
+    const mapping = config.subAgents.strategyMapping[taskType];
+
+    // Guard: skip if no strategy files to tune
+    if (!mapping || mapping.length === 0) {
+      await saveTunerState(state);
+      return;
+    }
+
     const currentHash = await hashStrategies(taskType);
 
     // Backup current strategies
     await backupStrategies(taskType, currentHash);
 
+    // Prune old backups to prevent unbounded disk growth
+    await pruneOldBackups(taskType);
+
     // Load current strategy files
-    const mapping = config.subAgents.strategyMapping[taskType];
     const strategyContents: string[] = [];
     for (const { file, label } of mapping) {
       const filePath = join(config.subAgents.strategiesPath, file);

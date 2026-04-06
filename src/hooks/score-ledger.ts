@@ -29,22 +29,23 @@ export interface LedgerEntry {
   strategyHash: string;
 }
 
-let headerEnsured = false;
+/** Singleton promise prevents concurrent callers from writing duplicate headers. */
+let headerPromise: Promise<void> | null = null;
 
-async function ensureHeader(): Promise<void> {
-  if (headerEnsured) return;
-  try {
-    const content = await readFile(LEDGER_PATH, "utf-8");
-    if (content.startsWith("timestamp\t")) {
-      headerEnsured = true;
-      return;
-    }
-  } catch {
-    // File doesn't exist yet
+function ensureHeader(): Promise<void> {
+  if (!headerPromise) {
+    headerPromise = (async () => {
+      try {
+        const content = await readFile(LEDGER_PATH, "utf-8");
+        if (content.startsWith("timestamp\t")) return;
+      } catch {
+        // File doesn't exist yet
+      }
+      await mkdir(dirname(LEDGER_PATH), { recursive: true });
+      await appendFile(LEDGER_PATH, HEADER, "utf-8");
+    })();
   }
-  await mkdir(dirname(LEDGER_PATH), { recursive: true });
-  await appendFile(LEDGER_PATH, HEADER, "utf-8");
-  headerEnsured = true;
+  return headerPromise;
 }
 
 /** Append a scored exchange to the ledger. */
@@ -75,20 +76,24 @@ export async function readRecentScores(n: number): Promise<LedgerEntry[]> {
   const lines = content.trim().split("\n").slice(1); // skip header
   const recent = lines.slice(-n);
 
-  return recent.map((line) => {
-    const [timestamp, taskType, model, score, tokens, costUSD, signals, strategyHash] =
-      line.split("\t");
-    return {
-      timestamp: timestamp!,
-      taskType: taskType!,
-      model: model!,
-      score: parseFloat(score!),
-      tokens: parseInt(tokens!, 10),
-      costUSD: parseFloat(costUSD!),
-      signals: signals === "none" ? [] : signals!.split(","),
-      strategyHash: strategyHash ?? "",
-    };
-  });
+  return recent
+    .map((line) => {
+      const cols = line.split("\t");
+      if (cols.length < 8) return null; // skip malformed rows
+      const score = parseFloat(cols[3]!);
+      if (isNaN(score)) return null;
+      return {
+        timestamp: cols[0]!,
+        taskType: cols[1]!,
+        model: cols[2]!,
+        score,
+        tokens: parseInt(cols[4]!, 10) || 0,
+        costUSD: parseFloat(cols[5]!) || 0,
+        signals: cols[6] === "none" ? [] : cols[6]!.split(","),
+        strategyHash: cols[7] ?? "",
+      };
+    })
+    .filter((e): e is LedgerEntry => e !== null);
 }
 
 /**
@@ -111,29 +116,3 @@ export async function averageScoreForStrategy(
   return { avg: sum / filtered.length, count: filtered.length };
 }
 
-/**
- * Compute average scores grouped by strategy hash for a given task type.
- * Useful for comparing strategy versions.
- */
-export async function scoresByStrategy(
-  taskType: string,
-  minEntries = 3,
-): Promise<Map<string, { avg: number; count: number }>> {
-  const entries = await readRecentScores(500);
-  const groups = new Map<string, number[]>();
-
-  for (const e of entries) {
-    if (e.taskType !== taskType) continue;
-    const arr = groups.get(e.strategyHash) ?? [];
-    arr.push(e.score);
-    groups.set(e.strategyHash, arr);
-  }
-
-  const result = new Map<string, { avg: number; count: number }>();
-  for (const [hash, scores] of groups) {
-    if (scores.length < minEntries) continue;
-    const avg = scores.reduce((a, b) => a + b, 0) / scores.length;
-    result.set(hash, { avg, count: scores.length });
-  }
-  return result;
-}

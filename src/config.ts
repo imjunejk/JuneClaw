@@ -90,6 +90,7 @@ export const config = {
     pidFile: join(home, ".juneclaw", "daemon.pid"),
     watchdogState: join(home, ".juneclaw", "watchdog-state.txt"),
     dreamState: join(home, ".juneclaw", "dream-state.json"),
+    tunerState: join(home, ".juneclaw", "tuner-state.json"),
   },
   subAgents: {
     maxConcurrent: 5,

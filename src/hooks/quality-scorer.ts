@@ -89,19 +89,30 @@ export function scoreExchange(
   const signals: string[] = [];
 
   // ── Follow-up signals ───────────────────────────────────────────
+  // Cap total contribution from follow-up to prevent score stacking
+  // when a message matches multiple patterns.
+  const MAX_FOLLOWUP_POSITIVE = 0.3;
+  const MAX_FOLLOWUP_NEGATIVE = -0.3;
+
   if (followUpMessage) {
+    let positiveDelta = 0;
+    let negativeDelta = 0;
+
     for (const { pattern, delta, label } of POSITIVE_FOLLOW_UP) {
       if (pattern.test(followUpMessage)) {
-        score += delta;
+        positiveDelta += delta;
         signals.push(`+${label}`);
       }
     }
     for (const { pattern, delta, label } of NEGATIVE_FOLLOW_UP) {
       if (pattern.test(followUpMessage)) {
-        score += delta; // delta is already negative
+        negativeDelta += delta; // delta is already negative
         signals.push(`-${label}`);
       }
     }
+
+    score += Math.min(positiveDelta, MAX_FOLLOWUP_POSITIVE);
+    score += Math.max(negativeDelta, MAX_FOLLOWUP_NEGATIVE);
   }
 
   // ── Runtime metric signals ──────────────────────────────────────

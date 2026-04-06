@@ -474,8 +474,14 @@ async function scorePreviousExchange(phone: string, followUpMessage: string): Pr
 async function processQuickMessage(
   channel: Channel,
   name: string,
+  phone: string,
   text: string,
 ): Promise<void> {
+  // Score previous heavy exchange using this quick message as follow-up
+  scorePreviousExchange(phone, text).catch((err) => {
+    log(`[quality] background scoring failed: ${err instanceof Error ? err.message : String(err)}`);
+  });
+
   log(`[quick] responding to: ${text.slice(0, 60)}...`);
   try {
     const response = await quickRespond(text);
@@ -499,8 +505,10 @@ async function processMessage(
   const name = channelConfig.name;
   await emit("message:received", { from: name });
 
-  // Score previous exchange using this new message as the follow-up signal
-  await scorePreviousExchange(phone, text);
+  // Score previous exchange using this new message as the follow-up signal (fire-and-forget)
+  scorePreviousExchange(phone, text).catch((err) => {
+    log(`[quality] background scoring failed: ${err instanceof Error ? err.message : String(err)}`);
+  });
 
   if (quietMode.get(phone)) {
     log(`[quiet] skipping message from ${name}`);
@@ -529,7 +537,7 @@ async function processMessage(
 
   // Quick lane: fire-and-forget, no session needed
   if (taskType === "quick") {
-    await processQuickMessage(channel, name, text);
+    await processQuickMessage(channel, name, phone, text);
     return;
   }
 
@@ -1001,7 +1009,7 @@ export async function startDaemon(): Promise<void> {
 
         // Quick lane: process immediately even if heavy work is ongoing
         if (taskType === "quick") {
-          processQuickMessage(channel, ch.name, msg.text).catch((err) => {
+          processQuickMessage(channel, ch.name, ch.phone, msg.text).catch((err) => {
             logError("[quick] fire-and-forget failed", err);
           });
           continue;
