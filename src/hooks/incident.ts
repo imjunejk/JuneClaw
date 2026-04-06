@@ -38,13 +38,16 @@ export async function logIncident(incident: Incident): Promise<void> {
  */
 export function inferCategory(msg: string): FailureCategory {
   const lower = msg.toLowerCase();
+
+  // Order matters: more specific patterns first, broader ones later.
+  // "cost limit" → cost_waste (not infrastructure), "context limit" → context_loss
   if (lower.includes("timeout") || lower.includes("exceeded time limit") || lower.includes("sigterm") || lower.includes("circuit")) {
     return "infrastructure";
   }
   if (lower.includes("context") || lower.includes("too long") || lower.includes("rotation")) {
     return "context_loss";
   }
-  if (lower.includes("cost") || lower.includes("limit") || lower.includes("budget")) {
+  if (lower.includes("cost") || lower.includes("budget") || /daily.*(limit|cap)/i.test(msg)) {
     return "cost_waste";
   }
   return "uncategorized";

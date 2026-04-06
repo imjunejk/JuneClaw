@@ -7,11 +7,9 @@
  * Format: <!-- SIGNAL:{"outcome":"success","taskType":"coding",...} -->
  */
 
-import { readFile, readdir } from "node:fs/promises";
-import { join } from "node:path";
+import { readFile, appendFile, mkdir } from "node:fs/promises";
+import { join, dirname } from "node:path";
 import { config, type TaskType } from "../config.js";
-import { appendFile, mkdir } from "node:fs/promises";
-import { dirname } from "node:path";
 import type { FailureCategory } from "./incident.js";
 
 export type SessionOutcome = "success" | "partial" | "failure";

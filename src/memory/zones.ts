@@ -62,13 +62,13 @@ export function replaceMutableZone(
     `(<!-- MUTABLE ZONE: ${escapeRegex(zoneName)} -->\\n)[\\s\\S]*?(<!-- END MUTABLE ZONE -->)`,
   );
 
-  if (!pattern.test(content)) {
-    return null; // Zone markers not found — refuse to write
-  }
-
   // Ensure newContent ends with a newline before the closing marker
   const normalized = newContent.endsWith("\n") ? newContent : newContent + "\n";
-  return content.replace(pattern, `$1${normalized}$2`);
+  const result = content.replace(pattern, `$1${normalized}$2`);
+
+  // If nothing changed, the zone was not found
+  if (result === content) return null;
+  return result;
 }
 
 /**
