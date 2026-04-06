@@ -1,6 +1,7 @@
-import { readFile, writeFile, mkdir } from "node:fs/promises";
-import { dirname } from "node:path";
+import { readFile } from "node:fs/promises";
 import { config } from "../config.js";
+import { AsyncMutex } from "../lib/async-mutex.js";
+import { atomicWriteFile } from "../lib/atomic-file.js";
 
 interface Exchange {
   question: string;
@@ -47,26 +48,30 @@ export function getRecentContext(): string | null {
   return `<cross-session-context>\n${lines.join("\n\n")}\n</cross-session-context>`;
 }
 
+// Mutex for shared context file — prevents concurrent read-modify-write corruption
+const sharedContextMutex = new AsyncMutex();
+
 /** Append a line to the shared context file (persistent cross-session state). */
 export async function appendSharedContext(line: string): Promise<void> {
-  const path = config.paths.sharedContext;
-  await mkdir(dirname(path), { recursive: true });
+  await sharedContextMutex.run(async () => {
+    const path = config.paths.sharedContext;
 
-  let existing = "";
-  try {
-    existing = await readFile(path, "utf-8");
-  } catch {
-    // no file yet
-  }
+    let existing = "";
+    try {
+      existing = await readFile(path, "utf-8");
+    } catch {
+      // no file yet
+    }
 
-  const lines = existing.trim().split("\n").filter(Boolean);
-  lines.push(`[${new Date().toISOString()}] ${line}`);
+    const lines = existing.trim().split("\n").filter(Boolean);
+    lines.push(`[${new Date().toISOString()}] ${line}`);
 
-  // Keep only the most recent N lines
-  const max = config.contextBridge.maxSharedContextLines;
-  const trimmed = lines.slice(-max);
+    // Keep only the most recent N lines
+    const max = config.contextBridge.maxSharedContextLines;
+    const trimmed = lines.slice(-max);
 
-  await writeFile(path, trimmed.join("\n") + "\n", "utf-8");
+    await atomicWriteFile(path, trimmed.join("\n") + "\n");
+  });
 }
 
 /** Read the shared context file for system prompt injection. */

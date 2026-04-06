@@ -1,6 +1,7 @@
-import { readFile, writeFile, mkdir } from "node:fs/promises";
-import { dirname } from "node:path";
+import { readFile } from "node:fs/promises";
 import { config, type TaskType } from "../config.js";
+import { AsyncMutex } from "../lib/async-mutex.js";
+import { atomicWriteJson } from "../lib/atomic-file.js";
 
 interface SessionEntry {
   sessionId: string;
@@ -13,6 +14,9 @@ interface SessionEntry {
 interface SessionStore {
   [phone: string]: Partial<Record<TaskType, SessionEntry>>;
 }
+
+// Mutex for session store — prevents read-modify-write races
+const sessionMutex = new AsyncMutex();
 
 async function loadStore(): Promise<SessionStore> {
   try {
@@ -43,12 +47,7 @@ async function loadStore(): Promise<SessionStore> {
 }
 
 async function saveStore(store: SessionStore): Promise<void> {
-  await mkdir(dirname(config.paths.sessions), { recursive: true, mode: 0o700 });
-  await writeFile(
-    config.paths.sessions,
-    JSON.stringify(store, null, 2),
-    { encoding: "utf-8", mode: 0o600 },
-  );
+  await atomicWriteJson(config.paths.sessions, store, { mode: 0o600 });
 }
 
 /** Get session ID for a specific phone + task type. */
@@ -56,18 +55,20 @@ export async function getSessionId(
   phone: string,
   taskType?: TaskType,
 ): Promise<string | undefined> {
-  const store = await loadStore();
-  const entries = store[phone];
-  if (!entries) return undefined;
+  return sessionMutex.run(async () => {
+    const store = await loadStore();
+    const entries = store[phone];
+    if (!entries) return undefined;
 
-  if (taskType) {
-    return entries[taskType]?.sessionId;
-  }
+    if (taskType) {
+      return entries[taskType]?.sessionId;
+    }
 
-  // Legacy fallback: return any active session (general first)
-  return entries.general?.sessionId
-    ?? entries.coding?.sessionId
-    ?? entries.research?.sessionId;
+    // Legacy fallback: return any active session (general first)
+    return entries.general?.sessionId
+      ?? entries.coding?.sessionId
+      ?? entries.research?.sessionId;
+  });
 }
 
 /** Set or update session entry for a phone + task type. */
@@ -77,21 +78,23 @@ export async function setSessionId(
   taskType: TaskType = "general",
   model?: string,
 ): Promise<void> {
-  const store = await loadStore();
-  if (!store[phone]) store[phone] = {};
+  await sessionMutex.run(async () => {
+    const store = await loadStore();
+    if (!store[phone]) store[phone] = {};
 
-  const existing = store[phone][taskType];
-  const now = new Date().toISOString();
+    const existing = store[phone][taskType];
+    const now = new Date().toISOString();
 
-  store[phone][taskType] = {
-    sessionId,
-    model: model ?? existing?.model ?? config.claude.modelRouting[taskType],
-    createdAt: existing?.createdAt ?? now,
-    lastActiveAt: now,
-    messageCount: (existing?.messageCount ?? 0) + 1,
-  };
+    store[phone][taskType] = {
+      sessionId,
+      model: model ?? existing?.model ?? config.claude.modelRouting[taskType],
+      createdAt: existing?.createdAt ?? now,
+      lastActiveAt: now,
+      messageCount: (existing?.messageCount ?? 0) + 1,
+    };
 
-  await saveStore(store);
+    await saveStore(store);
+  });
 }
 
 /** Clear session for a specific task type, or all sessions for a phone. */
@@ -99,24 +102,28 @@ export async function clearSessionId(
   phone: string,
   taskType?: TaskType,
 ): Promise<void> {
-  const store = await loadStore();
-  if (!store[phone]) return;
+  await sessionMutex.run(async () => {
+    const store = await loadStore();
+    if (!store[phone]) return;
 
-  if (taskType) {
-    delete store[phone][taskType];
-  } else {
-    delete store[phone];
-  }
+    if (taskType) {
+      delete store[phone][taskType];
+    } else {
+      delete store[phone];
+    }
 
-  await saveStore(store);
+    await saveStore(store);
+  });
 }
 
 /** Get all active session entries for a phone number. */
 export async function getSessionEntries(
   phone: string,
 ): Promise<Partial<Record<TaskType, SessionEntry>>> {
-  const store = await loadStore();
-  return store[phone] ?? {};
+  return sessionMutex.run(async () => {
+    const store = await loadStore();
+    return store[phone] ?? {};
+  });
 }
 
 /** Get a specific session entry with full metadata. */
@@ -124,36 +131,40 @@ export async function getSessionEntry(
   phone: string,
   taskType: TaskType,
 ): Promise<SessionEntry | undefined> {
-  const store = await loadStore();
-  return store[phone]?.[taskType];
+  return sessionMutex.run(async () => {
+    const store = await loadStore();
+    return store[phone]?.[taskType];
+  });
 }
 
 /** Clean up expired sessions based on idle timeout and max age. */
 export async function cleanupExpiredSessions(phone: string): Promise<string[]> {
-  const store = await loadStore();
-  const entries = store[phone];
-  if (!entries) return [];
+  return sessionMutex.run(async () => {
+    const store = await loadStore();
+    const entries = store[phone];
+    if (!entries) return [];
 
-  const now = Date.now();
-  const cleaned: string[] = [];
+    const now = Date.now();
+    const cleaned: string[] = [];
 
-  for (const [type, entry] of Object.entries(entries) as [TaskType, SessionEntry][]) {
-    const lastActive = new Date(entry.lastActiveAt).getTime();
-    const idleTimeout = config.sessionPool.idleTimeouts[type];
-    const maxAge = config.sessionPool.maxSessionAge;
+    for (const [type, entry] of Object.entries(entries) as [TaskType, SessionEntry][]) {
+      const lastActive = new Date(entry.lastActiveAt).getTime();
+      const idleTimeout = config.sessionPool.idleTimeouts[type];
+      const maxAge = config.sessionPool.maxSessionAge;
 
-    const idleExpired = idleTimeout > 0 && (now - lastActive) > idleTimeout;
-    const ageExpired = (now - lastActive) > maxAge;
+      const idleExpired = idleTimeout > 0 && (now - lastActive) > idleTimeout;
+      const ageExpired = (now - lastActive) > maxAge;
 
-    if (idleExpired || ageExpired) {
-      delete entries[type];
-      cleaned.push(type);
+      if (idleExpired || ageExpired) {
+        delete entries[type];
+        cleaned.push(type);
+      }
     }
-  }
 
-  if (cleaned.length > 0) {
-    await saveStore(store);
-  }
+    if (cleaned.length > 0) {
+      await saveStore(store);
+    }
 
-  return cleaned;
+    return cleaned;
+  });
 }

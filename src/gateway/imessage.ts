@@ -1,8 +1,9 @@
 import { execFile } from "node:child_process";
-import { readFile, writeFile, mkdir } from "node:fs/promises";
-import { dirname } from "node:path";
+import { readFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import { config } from "../config.js";
+import { AsyncMutex } from "../lib/async-mutex.js";
+import { atomicWriteJson } from "../lib/atomic-file.js";
 import type { IncomingMessage, Channel } from "./types.js";
 
 const execFileAsync = promisify(execFile);
@@ -42,6 +43,9 @@ interface ImsgMessage {
 
 type LastSeenStore = Record<string, number>; // chatId → lastSeenRowId
 
+// Mutex for lastSeen store — prevents read-modify-write races on restart/concurrent polls
+const lastSeenMutex = new AsyncMutex();
+
 async function loadLastSeenStore(): Promise<LastSeenStore> {
   try {
     const data = await readFile(config.paths.lastSeen, "utf-8");
@@ -52,8 +56,7 @@ async function loadLastSeenStore(): Promise<LastSeenStore> {
 }
 
 async function saveLastSeenStore(store: LastSeenStore): Promise<void> {
-  await mkdir(dirname(config.paths.lastSeen), { recursive: true });
-  await writeFile(config.paths.lastSeen, JSON.stringify(store, null, 2), "utf-8");
+  await atomicWriteJson(config.paths.lastSeen, store);
 }
 
 export function createIMessageChannel(
@@ -64,50 +67,52 @@ export function createIMessageChannel(
 
   return {
     async pollNewMessages(): Promise<IncomingMessage[]> {
-      if (lastSeenId === null) {
-        const store = await loadLastSeenStore();
-        lastSeenId = store[String(chatId)] ?? 0;
-      }
-
-      const { stdout } = await execWithTimeout("imsg", [
-        "history",
-        "--chat-id",
-        String(chatId),
-        "--limit",
-        "20",
-        "--json",
-      ], IMSG_TIMEOUT_MS);
-
-      const messages: ImsgMessage[] = [];
-      for (const line of stdout.trim().split("\n").filter(Boolean)) {
-        try {
-          messages.push(JSON.parse(line));
-        } catch {
-          // Skip malformed JSON lines from imsg
+      return lastSeenMutex.run(async () => {
+        if (lastSeenId === null) {
+          const store = await loadLastSeenStore();
+          lastSeenId = store[String(chatId)] ?? 0;
         }
-      }
 
-      const newMessages = messages
-        .filter((m) => m.id > lastSeenId! && !m.is_from_me && m.text)
-        .sort((a, b) => a.id - b.id);
+        const { stdout } = await execWithTimeout("imsg", [
+          "history",
+          "--chat-id",
+          String(chatId),
+          "--limit",
+          "20",
+          "--json",
+        ], IMSG_TIMEOUT_MS);
 
-      if (newMessages.length > 0) {
-        const maxId = Math.max(...newMessages.map((m) => m.id));
-        lastSeenId = maxId;
-        const store = await loadLastSeenStore();
-        store[String(chatId)] = maxId;
-        await saveLastSeenStore(store);
-      }
+        const messages: ImsgMessage[] = [];
+        for (const line of stdout.trim().split("\n").filter(Boolean)) {
+          try {
+            messages.push(JSON.parse(line));
+          } catch {
+            // Skip malformed JSON lines from imsg
+          }
+        }
 
-      return newMessages.map((m) => ({
-        id: m.id,
-        guid: m.guid,
-        chatId: m.chat_id,
-        text: m.text!,
-        sender: m.sender,
-        isFromMe: m.is_from_me,
-        createdAt: m.created_at,
-      }));
+        const newMessages = messages
+          .filter((m) => m.id > lastSeenId! && !m.is_from_me && m.text)
+          .sort((a, b) => a.id - b.id);
+
+        if (newMessages.length > 0) {
+          const maxId = Math.max(...newMessages.map((m) => m.id));
+          lastSeenId = maxId;
+          const store = await loadLastSeenStore();
+          store[String(chatId)] = maxId;
+          await saveLastSeenStore(store);
+        }
+
+        return newMessages.map((m) => ({
+          id: m.id,
+          guid: m.guid,
+          chatId: m.chat_id,
+          text: m.text!,
+          sender: m.sender,
+          isFromMe: m.is_from_me,
+          createdAt: m.created_at,
+        }));
+      });
     },
 
     async sendMessage(text: string): Promise<void> {
