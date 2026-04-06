@@ -39,6 +39,8 @@ export const config = {
       "TodoWrite",
     ],
     timeoutMs: 600_000,
+    /** Tools loaded on-demand when MCP servers are added (not used for built-in tools) */
+    deferredTools: [] as string[],
     model: process.env.JUNECLAW_MODEL,
     modelRouting: {
       coding: process.env.JUNECLAW_CODING_MODEL ?? "claude-opus-4-6",
