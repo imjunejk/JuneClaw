@@ -2,6 +2,7 @@ import { readFile, readdir, unlink } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { join } from "node:path";
+import { createHash } from "node:crypto";
 import { config, type TaskType } from "../config.js";
 
 const execFileAsync = promisify(execFile);
@@ -55,13 +56,6 @@ interface FileSpec {
   path: string;
   maxChars: number;
   deleteAfterLoad?: boolean;
-  /**
-   * Which end of the file to keep when truncation is needed. Default
-   * `"head"` matches the original behavior for static files (SOUL,
-   * IDENTITY, master-rules, etc.) where the top of the file is the most
-   * important. `"tail"` is for append-only logs (daily journal) where
-   * the most recent entries carry the most signal.
-   */
   truncateFrom?: "head" | "tail";
 }
 
@@ -127,42 +121,105 @@ async function findMostRecent(dir: string): Promise<string | null> {
   }
 }
 
-export async function buildSystemPrompt(
+// ── Static Prompt Cache ──────────────────────────────────────
+// Claude API caches prompt prefixes by byte-identical matching.
+// By splitting the system prompt into STATIC (persona, rules, strategies)
+// and DYNAMIC (daily logs, conversation, runtime state), we ensure the
+// static prefix hits the cache on every call → ~90% token cost reduction
+// on the cached portion.
+
+interface PromptCache {
+  hash: string;
+  content: string;
+}
+
+const staticCache = new Map<string, PromptCache>();
+
+function hashContent(content: string): string {
+  return createHash("sha256").update(content).digest("hex").slice(0, 16);
+}
+
+/**
+ * Build the STATIC portion of the system prompt.
+ * This content changes rarely (only when persona/strategy files are edited)
+ * and is the same across consecutive calls with the same taskType.
+ *
+ * Sections are sorted alphabetically by label within each group to maintain
+ * byte-identical ordering — if the order shifts, the API cache breaks.
+ */
+async function buildStaticPrompt(taskType: TaskType): Promise<string> {
+  const ws = config.workspace;
+
+  // Core identity files — sorted alphabetically
+  const coreFiles: FileSpec[] = [
+    { label: "AGENTS", path: join(ws, "AGENTS.md"), maxChars: 5000 },
+    { label: "COMMUNICATION RULES", path: join(ws, "docs", "communication-rules.md"), maxChars: 5000 },
+    { label: "HEARTBEAT", path: join(ws, "HEARTBEAT.md"), maxChars: 3000 },
+    { label: "IDENTITY", path: join(ws, "IDENTITY.md"), maxChars: 3000 },
+    { label: "MASTER RULES", path: join(ws, "memory", "lessons", "master-rules.md"), maxChars: 10000 },
+    { label: "OPERATING PRINCIPLES", path: join(ws, "docs", "operating-principles.md"), maxChars: 5000 },
+    { label: "SESSION MANAGEMENT", path: join(ws, "docs", "session-management.md"), maxChars: 4000 },
+    { label: "SOUL", path: join(ws, "SOUL.md"), maxChars: 8000 },
+    { label: "SUB_AGENTS", path: join(ws, "SUB_AGENTS.md"), maxChars: 10000 },
+    { label: "USER", path: join(ws, "USER.md"), maxChars: 3000 },
+    { label: "YSU CHECKLIST", path: join(ws, "checklists", "YSU-CHECKLIST.md"), maxChars: 3000 },
+  ];
+
+  // Strategy files — already sorted in config, but ensure alphabetical
+  const strategyEntries = [...config.subAgents.strategyMapping[taskType]]
+    .sort((a, b) => a.label.localeCompare(b.label));
+  const strategyFiles: FileSpec[] = strategyEntries.map((entry) => ({
+    label: `STRATEGY: ${entry.label}`,
+    path: join(config.subAgents.strategiesPath, entry.file),
+    maxChars: entry.maxChars,
+  }));
+
+  // Skill definitions — sorted alphabetically
+  const skillSections: string[] = [];
+  const skillsDir = join(ws, "skills");
+  try {
+    const skillEntries = (await readdir(skillsDir, { withFileTypes: true }))
+      .filter((e) => e.isDirectory())
+      .sort((a, b) => a.name.localeCompare(b.name));
+    for (const entry of skillEntries) {
+      const skillPath = join(skillsDir, entry.name, "SKILL.md");
+      const content = await loadFileOrNull(skillPath);
+      if (content) {
+        skillSections.push(`## SKILL: ${entry.name}\n${truncate(content.trim(), 2000)}`);
+      }
+    }
+  } catch {
+    // No skills directory
+  }
+
+  const sections: string[] = [];
+  for (const { label, path, maxChars } of [...coreFiles, ...strategyFiles]) {
+    const content = await loadFileOrNull(path);
+    if (content) {
+      sections.push(`## ${label}\n${truncate(content.trim(), maxChars)}`);
+    }
+  }
+  sections.push(...skillSections);
+
+  return sections.join("\n\n");
+}
+
+/**
+ * Build the DYNAMIC portion of the system prompt.
+ * This content changes every turn: daily logs, handoff, conversation history,
+ * weekly/monthly summaries, and runtime context.
+ */
+async function buildDynamicPrompt(
   channelId: string,
   senderName: string,
-  taskType?: TaskType,
-): Promise<string> {
+  taskType: TaskType,
+): Promise<{ content: string; dynamicSections: string[] }> {
   const ws = config.workspace;
   const today = new Date();
   const yesterday = new Date(today);
   yesterday.setDate(yesterday.getDate() - 1);
 
-  const files: FileSpec[] = [
-    { label: "SOUL", path: join(ws, "SOUL.md"), maxChars: 8000 },
-    { label: "IDENTITY", path: join(ws, "IDENTITY.md"), maxChars: 3000 },
-    { label: "USER", path: join(ws, "USER.md"), maxChars: 3000 },
-    { label: "AGENTS", path: join(ws, "AGENTS.md"), maxChars: 5000 },
-    { label: "SUB_AGENTS", path: join(ws, "SUB_AGENTS.md"), maxChars: 10000 },
-    {
-      label: "OPERATING PRINCIPLES",
-      path: join(ws, "docs", "operating-principles.md"),
-      maxChars: 5000,
-    },
-    {
-      label: "SESSION MANAGEMENT",
-      path: join(ws, "docs", "session-management.md"),
-      maxChars: 4000,
-    },
-    {
-      label: "COMMUNICATION RULES",
-      path: join(ws, "docs", "communication-rules.md"),
-      maxChars: 5000,
-    },
-    {
-      label: "MASTER RULES",
-      path: join(ws, "memory", "lessons", "master-rules.md"),
-      maxChars: 10000,
-    },
+  const dynamicFiles: FileSpec[] = [
     {
       label: `DAILY (${formatDate(today)})`,
       path: join(ws, "memory", "daily", `${formatDate(today)}.md`),
@@ -181,87 +238,40 @@ export async function buildSystemPrompt(
       maxChars: 5000,
       deleteAfterLoad: true,
     },
-    {
-      label: "YSU CHECKLIST",
-      path: join(ws, "checklists", "YSU-CHECKLIST.md"),
-      maxChars: 3000,
-    },
-    {
-      label: "HEARTBEAT",
-      path: join(ws, "HEARTBEAT.md"),
-      maxChars: 3000,
-    },
   ];
 
-  // Add strategy files based on task type (coding → FE/BE, research → Strategy, general → PM)
-  const strategyEntries = config.subAgents.strategyMapping[taskType ?? "general"];
-  const strategyFiles: FileSpec[] = strategyEntries.map((entry) => ({
-    label: `STRATEGY: ${entry.label}`,
-    path: join(config.subAgents.strategiesPath, entry.file),
-    maxChars: entry.maxChars,
-  }));
-
   const sections: string[] = [];
-  for (const { label, path, maxChars, deleteAfterLoad, truncateFrom } of [
-    ...files,
-    ...strategyFiles,
-  ]) {
+  for (const { label, path, maxChars, deleteAfterLoad, truncateFrom } of dynamicFiles) {
     const content = await loadFileOrNull(path);
     if (content) {
       sections.push(`## ${label}\n${truncate(content.trim(), maxChars, truncateFrom)}`);
       if (deleteAfterLoad) {
-        try {
-          await unlink(path);
-        } catch {
-          // ignore
-        }
+        try { await unlink(path); } catch { /* ignore */ }
       }
     }
   }
 
-  // Load skill definitions from skills/
-  const skillsDir = join(ws, "skills");
-  try {
-    const skillEntries = await readdir(skillsDir, { withFileTypes: true });
-    for (const entry of skillEntries) {
-      if (!entry.isDirectory()) continue;
-      const skillPath = join(skillsDir, entry.name, "SKILL.md");
-      const content = await loadFileOrNull(skillPath);
-      if (content) {
-        sections.push(
-          `## SKILL: ${entry.name}\n${truncate(content.trim(), 2000)}`,
-        );
-      }
-    }
-  } catch {
-    // No skills directory
-  }
-
-  // Add most recent weekly/monthly summaries for long-term memory
+  // Weekly/monthly summaries
   const weeklyDir = join(ws, "memory", "weekly");
   const monthlyDir = join(ws, "memory", "monthly");
 
   const recentWeekly = await findMostRecent(weeklyDir);
   if (recentWeekly) {
-    sections.push(
-      `## WEEKLY SUMMARY (latest)\n${truncate(recentWeekly.trim(), 4000)}`,
-    );
+    sections.push(`## WEEKLY SUMMARY (latest)\n${truncate(recentWeekly.trim(), 4000)}`);
   }
 
   const recentMonthly = await findMostRecent(monthlyDir);
   if (recentMonthly) {
-    sections.push(
-      `## MONTHLY SUMMARY (latest)\n${truncate(recentMonthly.trim(), 3000)}`,
-    );
+    sections.push(`## MONTHLY SUMMARY (latest)\n${truncate(recentMonthly.trim(), 3000)}`);
   }
 
-  const workspaceContext = `<workspace_context>\n${sections.join("\n\n")}\n</workspace_context>`;
-
+  // Conversation history
   const conversationHistory = await fetchRecentMessages();
 
+  // Runtime context
   const phone = config.channels.june.phone;
   const toolsPath = config.subAgents.toolsPath;
-  const sessionType = taskType ?? "general";
+  const sessionType = taskType;
   const taskRoleMap: Record<TaskType, string> = {
     coding: `Session type: CODING — Apply Youngsik (Frontend) and Youngchul (Backend) engineering principles.
 Focus: implementation quality, type safety, testing, code review standards.
@@ -274,6 +284,7 @@ Focus: planning, coordination, delegation, product decisions, user communication
 Delegate to sub-agents when specialized work is needed.`,
     quick: `Session type: QUICK — Concise response only.`,
   };
+
   const runtimeContext = `<runtime_context>
 Time: ${formatTimePT(today)}
 Channel: iMessage from ${senderName} (${phone})
@@ -292,54 +303,82 @@ Sub-agent delegation (use Agent tool):
 Send iMessage (proactive only): Bash("imsg send --to ${phone} --text \\"...\\"")
 </runtime_context>`;
 
-  const parts = [workspaceContext];
+  const parts = sections;
   if (conversationHistory) {
     parts.push(conversationHistory);
   }
   parts.push(runtimeContext);
 
-  const prompt = parts.join("\n\n");
+  return { content: parts.join("\n\n"), dynamicSections: sections };
+}
 
-  // Per-section size breakdown so we can identify the biggest contributors
-  // to prompt bloat (H2 investigation). Derived from the already-built
-  // section strings so the loader path doesn't need parallel bookkeeping.
-  // Note: each size includes the "## LABEL\n" header (~20-30 chars), since
-  // that header also contributes to the final prompt length.
-  const sectionEntries = sections.map((s) => {
-    // Sections are always pushed as `## ${label}\n${content}` by this file —
-    // see the push sites above — so slicing past the "## " prefix and up to
-    // the first newline gives us the label back.
-    const firstNewline = s.indexOf("\n");
-    const rawLabel = firstNewline > 0 ? s.slice(3, firstNewline) : "UNKNOWN";
-    // Preserve the parenthesised qualifier that distinguishes e.g.
-    // "DAILY (today)" from "DAILY (yesterday)" or the four STRATEGY files
-    // from each other — just escape whitespace and "=" so the key=value
-    // format stays unambiguous.
-    const label = rawLabel.replace(/[\s=]+/g, "_");
-    return `${label}=${s.length}`;
-  });
-  // Overhead = everything in the final prompt that isn't a loader section:
-  // `<workspace_context>` wrapper, section join separators, conversation
-  // history (from imsg), runtime_context template, and part separators.
-  // Logging it explicitly so readers can reconcile sum(sections) + overhead
-  // ≈ total without having to infer it.
-  const sectionsTotal = sections.reduce((sum, s) => sum + s.length, 0);
-  const overhead = prompt.length - sectionsTotal;
-  const taskLabel = taskType ?? "general";
-  console.log(
-    `[loader] ${channelId}/${taskLabel} total=${prompt.length} overhead=${overhead} sections=${sections.length} [${sectionEntries.join(" ")}]`,
+// ── Public API ──────────────────────────────────────────────
+
+export interface SystemPromptResult {
+  /** Full system prompt (static + dynamic) */
+  prompt: string;
+  /** Static portion — cache this across calls with same taskType */
+  staticPrompt: string;
+  /** Dynamic portion — changes every turn */
+  dynamicPrompt: string;
+  /** Hash of static prompt — use to detect when cache should be invalidated */
+  staticHash: string;
+}
+
+export async function buildSystemPrompt(
+  channelId: string,
+  senderName: string,
+  taskType?: TaskType,
+): Promise<string> {
+  const result = await buildSystemPromptSplit(channelId, senderName, taskType);
+  return result.prompt;
+}
+
+export async function buildSystemPromptSplit(
+  channelId: string,
+  senderName: string,
+  taskType?: TaskType,
+): Promise<SystemPromptResult> {
+  const tt = taskType ?? "general";
+
+  // Build static prompt (check cache first)
+  let staticContent = await buildStaticPrompt(tt);
+  const currentHash = hashContent(staticContent);
+
+  const cached = staticCache.get(tt);
+  if (cached && cached.hash === currentHash) {
+    staticContent = cached.content; // byte-identical for API cache
+  } else {
+    staticCache.set(tt, { hash: currentHash, content: staticContent });
+  }
+
+  // Build dynamic prompt (always fresh)
+  const { content: dynamicContent, dynamicSections } = await buildDynamicPrompt(
+    channelId, senderName, tt,
   );
 
-  // Threshold raised from 80k to 100k after measurement showed the steady
-  // state is 82-93k depending on task type, dominated by legitimately-loaded
-  // content (master-rules, SUB_AGENTS, daily logs, strategies). The old 80k
-  // threshold fired on every call and was noise; this should only fire on
-  // pathological outliers now.
+  // Assemble: STATIC first (cacheable prefix) then DYNAMIC
+  const staticWrapped = `<workspace_context>\n${staticContent}`;
+  const dynamicWrapped = `${dynamicContent}\n</workspace_context>`;
+  const prompt = `${staticWrapped}\n\n__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__\n\n${dynamicWrapped}`;
+
+  // Diagnostic logging
+  const taskLabel = tt;
+  console.log(
+    `[loader] ${channelId}/${taskLabel} total=${prompt.length} static=${staticContent.length} dynamic=${dynamicContent.length} cache=${cached?.hash === currentHash ? "HIT" : "MISS"}`,
+  );
+
   const PROMPT_WARN_THRESHOLD = 100_000;
   if (prompt.length > PROMPT_WARN_THRESHOLD) {
     console.warn(
       `[loader] system prompt is ${prompt.length} chars (threshold: ${PROMPT_WARN_THRESHOLD})`,
     );
   }
-  return prompt;
+
+  return {
+    prompt,
+    staticPrompt: staticWrapped,
+    dynamicPrompt: dynamicWrapped,
+    staticHash: currentHash,
+  };
 }

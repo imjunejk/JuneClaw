@@ -107,7 +107,6 @@ export async function runClaude(opts: {
   model?: string;
   taskType?: TaskType;
 }): Promise<RunResult> {
-  // Write system prompt to temp file to avoid arg length / null byte issues
   const promptDir = join(tmpdir(), "juneclaw");
   await mkdir(promptDir, { recursive: true });
   const promptFile = join(promptDir, `sysprompt-${randomUUID()}.md`);
