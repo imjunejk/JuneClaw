@@ -205,9 +205,46 @@ async function buildStaticPrompt(taskType: TaskType): Promise<string> {
 }
 
 /**
+ * Load the 3-tier memory index and referenced topic files.
+ *
+ * Tier 1: INDEX.md (always loaded, max 5000 chars)
+ * Tier 2: topic files referenced via `- [Title](topics/filename.md)` (max 5 files, 3000 chars each)
+ * Tier 3: raw logs (grep only — not loaded here)
+ */
+async function loadMemoryIndex(ws: string): Promise<string[]> {
+  const sections: string[] = [];
+
+  // Tier 1: INDEX.md
+  const indexPath = join(ws, "memory", "INDEX.md");
+  const indexContent = await loadFileOrNull(indexPath);
+  if (!indexContent) return sections;
+  sections.push(`## MEMORY INDEX\n${truncate(indexContent.trim(), 5000)}`);
+
+  // Tier 2: parse topic references and load them
+  const topicPattern = /^- \[([^\]]+)\]\(topics\/([^)]+\.md)\)/gm;
+  let match: RegExpExecArray | null;
+  let topicCount = 0;
+  const MAX_TOPICS = 5;
+  const MAX_TOPIC_CHARS = 3000;
+
+  while ((match = topicPattern.exec(indexContent)) !== null && topicCount < MAX_TOPICS) {
+    const title = match[1]!;
+    const filename = match[2]!;
+    const topicPath = join(ws, "memory", "topics", filename);
+    const topicContent = await loadFileOrNull(topicPath);
+    if (topicContent) {
+      sections.push(`## MEMORY TOPIC: ${title}\n${truncate(topicContent.trim(), MAX_TOPIC_CHARS)}`);
+      topicCount++;
+    }
+  }
+
+  return sections;
+}
+
+/**
  * Build the DYNAMIC portion of the system prompt.
  * This content changes every turn: daily logs, handoff, conversation history,
- * weekly/monthly summaries, and runtime context.
+ * weekly/monthly summaries, memory index/topics, and runtime context.
  */
 async function buildDynamicPrompt(
   channelId: string,
@@ -264,6 +301,10 @@ async function buildDynamicPrompt(
   if (recentMonthly) {
     sections.push(`## MONTHLY SUMMARY (latest)\n${truncate(recentMonthly.trim(), 3000)}`);
   }
+
+  // 3-tier memory: INDEX.md + topic files
+  const memorySections = await loadMemoryIndex(ws);
+  sections.push(...memorySections);
 
   // Conversation history
   const conversationHistory = await fetchRecentMessages();

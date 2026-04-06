@@ -19,6 +19,7 @@ import { cascadeKill, cleanupStaleAgents, cleanupCompletedAgents } from "./agent
 import { writeHandoff, writeSmartHandoff } from "./memory/handoff.js";
 import { emit } from "./hooks/events.js";
 import { logFromError } from "./hooks/incident.js";
+import { recordCost, isOverLimit, isNearLimit, getDailyCost } from "./hooks/cost-monitor.js";
 import {
   recordError,
   recordSuccess,
@@ -501,6 +502,21 @@ async function processMessage(
     if (result.usage) {
       recordUsage(phone, result.usage);
       log(`[usage] (${taskType}) ${result.usage.totalTokens.toLocaleString()} tokens (${result.usage.usagePercent.toFixed(1)}% of ${result.usage.contextWindow.toLocaleString()}), $${result.usage.costUSD.toFixed(4)}`);
+
+      // Cost monitor: track daily spend
+      recordCost(result.usage.costUSD);
+      if (isOverLimit()) {
+        const daily = getDailyCost();
+        log(`[cost] OVER LIMIT: $${daily.totalUSD.toFixed(2)} today (${daily.callCount} calls)`);
+        await channel.sendMessage(
+          `[Cost Alert] 오늘 API 비용 $${daily.totalUSD.toFixed(2)} — 일일 한도 초과. 추가 처리를 중단합니다.`,
+        );
+        return;
+      }
+      if (isNearLimit()) {
+        const daily = getDailyCost();
+        log(`[cost] near limit: $${daily.totalUSD.toFixed(2)} today (${daily.callCount} calls)`);
+      }
     }
 
     if (result.sessionId) {
@@ -710,6 +726,7 @@ async function ensureWorkspaceDirs(): Promise<void> {
   await mkdir(join(ws, "memory", "weekly"), { recursive: true });
   await mkdir(join(ws, "memory", "monthly"), { recursive: true });
   await mkdir(join(ws, "memory", "lessons"), { recursive: true });
+  await mkdir(join(ws, "memory", "topics"), { recursive: true });
   await mkdir(join(ws, "strategies"), { recursive: true });
   await mkdir(join(ws, "tools"), { recursive: true });
   await mkdir(join(ws, "skills"), { recursive: true });
