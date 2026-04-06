@@ -121,6 +121,10 @@ export const config = {
     maxRecentExchanges: 5,
     maxSharedContextLines: 20,
   },
+  costMonitor: {
+    dailyLimitUSD: 50,
+    warningPercent: 80,
+  },
   cron: {
     schedules: {
       heartbeat: "*/10 * * * *",
