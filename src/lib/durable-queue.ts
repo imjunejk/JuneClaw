@@ -17,7 +17,7 @@
  *   Move them back to pending/ for reprocessing.
  */
 
-import { readFile, readdir, rename, mkdir, unlink, stat } from "node:fs/promises";
+import { readFile, readdir, rename, mkdir, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { atomicWriteJson } from "./atomic-file.js";
 
@@ -154,8 +154,8 @@ export class DurableQueue<T = unknown> {
         const raw = await readFile(path, "utf-8");
         const item = JSON.parse(raw) as QueueItem<T>;
 
-        // Check if worker PID is still alive
-        if (item.workerPid && isProcessAlive(item.workerPid)) continue;
+        // Check if worker PID is still alive (no PID = crashed before stamp → orphaned)
+        if (item.workerPid && item.workerPid !== process.pid && isProcessAlive(item.workerPid)) continue;
 
         // Worker is dead — move back to pending
         item.workerPid = undefined;
