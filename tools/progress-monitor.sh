@@ -11,7 +11,7 @@ set -uo pipefail
 
 STATE_FILE="$HOME/.juneclaw/progress-state.json"
 FIRST_DELAY=15       # seconds before first notification
-INTERVAL=45          # seconds between subsequent notifications
+INTERVAL=300         # seconds between subsequent notifications (5 min)
 POLL_INTERVAL=5      # polling frequency
 
 last_notified=0
