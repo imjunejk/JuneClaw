@@ -38,6 +38,9 @@ import {
   runWeeklyCompression,
   runMonthlyCompression,
 } from "./memory/consolidation.js";
+import { DurableQueue } from "./lib/durable-queue.js";
+import { WorkerPool } from "./lib/worker-pool.js";
+import { atomicWriteFile } from "./lib/atomic-file.js";
 import type { Channel } from "./gateway/types.js";
 
 function log(msg: string): void {
@@ -70,13 +73,42 @@ const quietMode = new Map<string, boolean>();
 let quietHoursOverrideUntil: number = 0;
 
 const processedIds = new Set<number>();
-let processing = false;
 const btwQueue: string[] = [];
-const pendingMessages: { text: string; taskType: TaskType }[] = [];
 let monitorProcess: ChildProcess | null = null;
 let monitorStopped = false;
 let remoteControlProcess: ChildProcess | null = null;
 let remoteControlStopped = false;
+
+// ── Durable Queue + Worker Pool ──────────────────────────────
+interface QueuedMessage {
+  text: string;
+  taskType: TaskType;
+  phone: string;
+  enqueuedAt: number;
+}
+
+const messageQueue = new DurableQueue<QueuedMessage>({
+  baseDir: join(config.workspace, "queue"),
+  maxRetries: 2,
+  maxCompleted: 50,
+});
+
+// Priority prefix for queue ordering (filenames sort lexicographically)
+const taskPriority: Record<TaskType, number> = { coding: 0, research: 1, general: 2, quick: 3 };
+
+// Track which phones have an active heavy worker to prevent session conflicts
+const activePhones = new Set<string>();
+
+const workerPool = new WorkerPool({
+  maxWorkers: 2,
+  onComplete(meta, error) {
+    if (error) {
+      log(`[pool] worker ${meta.id} failed (${meta.taskType}): ${error.message.slice(0, 80)}`);
+    } else {
+      log(`[pool] worker ${meta.id} completed (${meta.taskType})`);
+    }
+  },
+});
 
 interface ProgressState {
   startedAt: number;
@@ -322,11 +354,10 @@ async function releasePidLock(): Promise<void> {
 }
 
 async function saveState(): Promise<void> {
-  await mkdir(dirname(config.paths.statePath), { recursive: true, mode: 0o700 });
-  await writeFile(
+  await atomicWriteFile(
     config.paths.statePath,
     JSON.stringify(state, null, 2),
-    { encoding: "utf-8", mode: 0o600 },
+    { mode: 0o600 },
   );
 }
 
@@ -670,6 +701,19 @@ export async function startDaemon(): Promise<void> {
   const ch = config.channels.june;
   const channel = createIMessageChannel(ch.phone, ch.chatId);
 
+  // Recover orphaned queue items from previous crash
+  const recovered = await messageQueue.recover();
+  if (recovered > 0) {
+    log(`[queue] recovered ${recovered} orphaned task(s) from previous run`);
+  }
+  const qStats = await messageQueue.stats();
+  if (qStats.pending > 0) {
+    log(`[queue] ${qStats.pending} pending task(s) from previous session`);
+  }
+  if (qStats.dead > 0) {
+    log(`[queue] ${qStats.dead} dead-letter task(s)`);
+  }
+
   await saveState();
   await appendSystemLog(`Daemon started (PID: ${process.pid})`);
   await emit("daemon:startup", { pid: process.pid });
@@ -704,6 +748,18 @@ export async function startDaemon(): Promise<void> {
     stopProgressMonitor();
     stopAllCron();
 
+    // Drain worker pool (wait up to 30s for active workers)
+    if (workerPool.activeCount > 0) {
+      log(`[shutdown] waiting for ${workerPool.activeCount} active worker(s)...`);
+      await workerPool.drain(30_000);
+    }
+
+    // Move any still-processing queue items back to pending
+    const abandoned = await messageQueue.abandonAll();
+    if (abandoned > 0) {
+      log(`[shutdown] ${abandoned} task(s) returned to queue for next startup`);
+    }
+
     // Write handoff for next session
     await writeHandoff({ reason: `daemon shutdown (${signal})` }).catch(() => {});
 
@@ -732,8 +788,8 @@ export async function startDaemon(): Promise<void> {
         if (processedIds.has(msg.id)) continue;
         processedIds.add(msg.id);
 
-        // /btw while processing — queue for follow-up
-        if (processing && msg.text.trim().startsWith("/btw ")) {
+        // /btw while workers busy — queue for follow-up
+        if (workerPool.activeCount > 0 && msg.text.trim().startsWith("/btw ")) {
           const btw = msg.text.trim().slice(5);
           btwQueue.push(btw);
           log(`[btw] queued: ${btw.slice(0, 60)}...`);
@@ -762,71 +818,88 @@ export async function startDaemon(): Promise<void> {
           continue;
         }
 
-        // Heavy lane: queue if already processing (max 10)
-        if (processing) {
-          if (pendingMessages.length >= 10) {
-            log(`[pending] queue full — dropping: ${msg.text.slice(0, 40)}...`);
-            await channel.sendMessage("처리 대기열이 가득 찼습니다. 잠시 후 다시 보내주세요.");
-          } else {
-            pendingMessages.push({ text: msg.text, taskType });
-            log(`[pending] queued (${taskType}): ${msg.text.slice(0, 60)}...`);
-          }
-          continue;
-        }
-
-        try {
-          processing = true;
-          await writeProgressState(taskType, msg.text, ch.phone);
-          await withProcessingLiveness(() => processMessage(channel, ch, msg.text, taskType));
-        } catch (err) {
-          logError("Failed to process message", err);
-          await channel.sendMessage("처리 중 오류가 발생했습니다.");
-        } finally {
-          await clearProgressState();
-          processing = false;
-        }
-
-        // Process /btw queue as follow-up
-        if (btwQueue.length > 0) {
-          const btws = btwQueue.splice(0);
-          const followUp = btws.length === 1
-            ? `[작업 중 추가 메시지] ${btws[0]}`
-            : `[작업 중 추가 메시지]\n${btws.map((b) => `- ${b}`).join("\n")}`;
-          log(`[btw] processing ${btws.length} queued message(s)`);
-          try {
-            processing = true;
-            await writeProgressState("general", followUp, ch.phone);
-            await withProcessingLiveness(() => processMessage(channel, ch, followUp, "general"));
-          } catch (err) {
-            logError("Failed to process /btw follow-up", err);
-          } finally {
-            await clearProgressState();
-            processing = false;
-          }
-        }
+        // Heavy lane: enqueue to durable queue (never drops)
+        // Priority prefix ensures coding (0) sorts before research (1) before general (2)
+        const priority = taskPriority[taskType] ?? 2;
+        const queueId = await messageQueue.enqueue({
+          text: msg.text,
+          taskType,
+          phone: ch.phone,
+          enqueuedAt: Date.now(),
+        }, `${priority}-${msg.id}-${Date.now()}`);
+        const pending = await messageQueue.pendingCount();
+        log(`[queue] enqueued ${queueId} (${taskType}), ${pending} pending`);
       }
 
-      // Process pending messages (priority: coding > research > general)
-      if (pendingMessages.length > 0) {
-        pendingMessages.sort((a, b) => {
-          const priority: Record<TaskType, number> = { coding: 0, research: 1, general: 2, quick: 3 };
-          return priority[a.taskType] - priority[b.taskType];
-        });
+      // ── /btw drain: flush btw queue before dispatching new work ──
+      if (btwQueue.length > 0 && workerPool.hasCapacity() && !activePhones.has(ch.phone)) {
+        const btws = btwQueue.splice(0);
+        const followUp = btws.length === 1
+          ? `[작업 중 추가 메시지] ${btws[0]}`
+          : `[작업 중 추가 메시지]\n${btws.map((b) => `- ${b}`).join("\n")}`;
+        log(`[btw] processing ${btws.length} queued message(s)`);
+        activePhones.add(ch.phone);
+        await workerPool.submit(
+          async () => {
+            try {
+              await writeProgressState("general", followUp, ch.phone);
+              await withProcessingLiveness(() => processMessage(channel, ch, followUp, "general"));
+            } catch (err) {
+              logError("Failed to process /btw follow-up", err);
+            } finally {
+              activePhones.delete(ch.phone);
+              await clearProgressState();
+            }
+          },
+          { taskType: "general", description: "btw follow-up" },
+        );
       }
-      while (pendingMessages.length > 0) {
-        const pending = pendingMessages.shift()!;
-        log(`[pending] processing (${pending.taskType}): ${pending.text.slice(0, 60)}...`);
-        try {
-          processing = true;
-          await writeProgressState(pending.taskType, pending.text, ch.phone);
-          await withProcessingLiveness(() => processMessage(channel, ch, pending.text, pending.taskType));
-        } catch (err) {
-          logError("Failed to process pending message", err);
-          await channel.sendMessage("처리 중 오류가 발생했습니다.");
-        } finally {
-          await clearProgressState();
-          processing = false;
+
+      // ── Worker Pool Drain: claim tasks from queue, submit to pool ──
+      while (workerPool.hasCapacity()) {
+        const task = await messageQueue.claim();
+        if (!task) break;
+
+        const { text, taskType: tt, phone } = task.data;
+
+        // Per-phone serialization: skip if this phone already has an active worker
+        // to prevent session/context conflicts from concurrent Claude CLI calls
+        if (activePhones.has(phone)) {
+          // Release back to pending without incrementing retryCount.
+          // Break (not continue) — same file would be re-claimed in a busy loop.
+          // Next poll cycle (2s) will retry.
+          await messageQueue.release(task.id);
+          break;
         }
+
+        log(`[pool] dispatching ${task.id} (${tt}): ${text.slice(0, 60)}...`);
+        activePhones.add(phone);
+
+        await workerPool.submit(
+          async () => {
+            try {
+              await writeProgressState(tt, text, phone);
+              await withProcessingLiveness(() => processMessage(channel, ch, text, tt));
+              await messageQueue.complete(task.id);
+            } catch (err) {
+              logError(`Failed to process ${task.id}`, err);
+              const disposition = await messageQueue.fail(
+                task.id,
+                err instanceof Error ? err.message : String(err),
+              );
+              if (disposition === "dead") {
+                log(`[queue] ${task.id} moved to dead letter queue after ${task.retryCount + 1} attempts`);
+              } else {
+                log(`[queue] ${task.id} will retry (attempt ${task.retryCount + 1})`);
+              }
+              await channel.sendMessage("처리 중 오류가 발생했습니다.").catch(() => {});
+            } finally {
+              activePhones.delete(phone);
+              await clearProgressState();
+            }
+          },
+          { taskType: tt, description: text.slice(0, 60) },
+        );
       }
     } catch (err) {
       logError("Poll cycle error", err);
