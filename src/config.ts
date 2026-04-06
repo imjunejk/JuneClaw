@@ -55,6 +55,17 @@ export const config = {
     minSessionsSinceLast: 5,
     model: "claude-sonnet-4-6",
     timeoutMs: 120_000,
+    hillClimbing: {
+      enabled: true,
+      /** Minimum sessions in the measurement window before evaluating */
+      minSessionsForEval: 5,
+      /** Days to wait after a dream before evaluating its impact */
+      evaluationWindowDays: 2,
+      /** Revert if success rate drops more than this (0.05 = 5 percentage points) */
+      successRateRevertThreshold: 0.05,
+      /** Revert if avg cost increases more than this (0.20 = 20%) */
+      costIncreaseRevertThreshold: 0.20,
+    },
   },
   poll: {
     intervalMs: 2000,

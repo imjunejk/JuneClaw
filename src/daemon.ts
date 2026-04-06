@@ -18,7 +18,8 @@ import { addJob, stopAll as stopAllCron } from "./scheduler/cron.js";
 import { cascadeKill, cleanupStaleAgents, cleanupCompletedAgents } from "./agent/subagents.js";
 import { writeHandoff, writeSmartHandoff } from "./memory/handoff.js";
 import { emit } from "./hooks/events.js";
-import { logFromError } from "./hooks/incident.js";
+import { logFromError, inferCategory } from "./hooks/incident.js";
+import { appendSessionSignal } from "./hooks/signals.js";
 import { recordCost, isOverLimit, isNearLimit, getDailyCost } from "./hooks/cost-monitor.js";
 import {
   recordError,
@@ -506,6 +507,7 @@ async function processMessage(
 
   // Get session for this specific task type
   const sessionId = await getSessionId(phone, taskType);
+  const sessionStartMs = Date.now();
 
   try {
     const result = await runClaude({
@@ -517,6 +519,16 @@ async function processMessage(
     });
 
     recordSuccess(phone);
+
+    // Emit success signal for self-improvement metrics
+    appendSessionSignal({
+      timestamp: new Date().toISOString(),
+      taskType,
+      outcome: "success",
+      costUSD: result.usage?.costUSD ?? 0,
+      tokenCount: result.usage?.totalTokens ?? 0,
+      durationMs: Date.now() - sessionStartMs,
+    }).catch(() => {}); // best-effort
 
     if (result.usage) {
       recordUsage(phone, result.usage);
@@ -620,6 +632,18 @@ async function processMessage(
     recordError(phone);
     await emit("message:error", { error: String(err) }).catch(() => {});
     await logFromError(err, `processMessage from ${name}`).catch(() => {});
+
+    // Emit failure signal for self-improvement metrics
+    const errMsg = err instanceof Error ? err.message : String(err);
+    appendSessionSignal({
+      timestamp: new Date().toISOString(),
+      taskType,
+      outcome: "failure",
+      category: inferCategory(errMsg),
+      costUSD: 0,
+      tokenCount: 0,
+      durationMs: Date.now() - sessionStartMs,
+    }).catch(() => {}); // best-effort
 
     if (
       err instanceof Error &&
