@@ -15,7 +15,7 @@
  * contains a dead PID, so the next startup cleans it up.
  */
 
-import { open, unlink, mkdir, readFile } from "node:fs/promises";
+import { open, unlink, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { config } from "../config.js";
 import { constants } from "node:fs";
@@ -124,7 +124,6 @@ function makeLock(): DaemonLock {
     async touch() {
       // Rewrite PID to update mtime (watchdog can check staleness)
       try {
-        const { writeFile } = await import("node:fs/promises");
         await writeFile(LOCK_PATH, String(process.pid));
       } catch {
         // Best-effort
