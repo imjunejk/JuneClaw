@@ -139,8 +139,15 @@ if [ "${1:-}" = "--once" ]; then
 fi
 
 # Loop mode: continuous polling
-echo "[progress-monitor] started (poll=${POLL_INTERVAL}s, first=${FIRST_DELAY}s, interval=${INTERVAL}s)"
+PARENT_PID=$PPID
+echo "[progress-monitor] started (poll=${POLL_INTERVAL}s, first=${FIRST_DELAY}s, interval=${INTERVAL}s, parent=${PARENT_PID})"
 while true; do
+  # Exit if parent daemon is dead (prevents orphan accumulation)
+  if ! kill -0 "$PARENT_PID" 2>/dev/null; then
+    echo "[progress-monitor] parent (PID ${PARENT_PID}) dead — exiting"
+    exit 0
+  fi
+
   check_once
 
   # Reset notification state when state file disappears (task completed)

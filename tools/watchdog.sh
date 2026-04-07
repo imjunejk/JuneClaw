@@ -25,13 +25,13 @@ is_daemon_alive() {
     kill -0 "$pid" 2>/dev/null && return 0
   fi
   # Also check by process name
-  pgrep -f "JuneClaw/dist/index" > /dev/null 2>&1 && return 0
+  pgrep -f "dist/index\\.js" > /dev/null 2>&1 && return 0
   return 1
 }
 
 restart_daemon() {
   echo "[$(ts)] Restarting JuneClaw daemon..."
-  pkill -f "JuneClaw/dist/index" 2>/dev/null || true
+  pkill -f "dist/index\\.js" 2>/dev/null || true
   pkill -f "remote-control.*juneclaw" 2>/dev/null || true
   pkill -f "progress-monitor.sh" 2>/dev/null || true
   sleep 2
@@ -49,7 +49,23 @@ if ! is_daemon_alive; then
   exit 0
 fi
 
-# 2. Check iMessage for restart command (last 2 minutes)
+# 2. Kill orphan children whose parent daemon is dead
+daemon_pid=""
+if [ -f "$JUNECLAW_PID" ]; then
+  daemon_pid=$(cat "$JUNECLAW_PID")
+fi
+for orphan_pid in $(pgrep -f "remote-control.*juneclaw" 2>/dev/null) $(pgrep -f "progress-monitor.sh" 2>/dev/null); do
+  parent=$(ps -p "$orphan_pid" -o ppid= 2>/dev/null | tr -d ' ')
+  # If parent is init (1) or a dead process, it's an orphan
+  if [ -n "$parent" ] && [ "$parent" != "$daemon_pid" ]; then
+    if ! kill -0 "$parent" 2>/dev/null || [ "$parent" = "1" ]; then
+      echo "[$(ts)] Killing orphan (PID $orphan_pid, dead parent $parent)"
+      kill -9 "$orphan_pid" 2>/dev/null || true
+    fi
+  fi
+done
+
+# 3. Check iMessage for restart command (last 2 minutes)
 recent=$($IMSG history --chat-id "$CHAT_ID" --limit 5 --json 2>/dev/null || true)
 if [ -n "$recent" ]; then
   # Look for "restart juneclaw" in recent messages (not from me)
