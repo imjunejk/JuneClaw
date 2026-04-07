@@ -836,11 +836,13 @@ async function runHeartbeat(
     await emit("heartbeat:failed", { error: String(err) });
   }
 
-  // Hill-climbing: evaluate pending experiment independently of dream gate.
-  // This ensures evaluations happen even when the daemon has low activity
-  // (fewer than 5 sessions / 24h) that wouldn't trigger shouldDream().
+  // Hill-climbing + autoDream: single dreamState load for both checks
   try {
     const dreamState = await loadDreamState();
+
+    // Evaluate pending experiment independently of dream gate.
+    // This ensures evaluations happen even when the daemon has low activity
+    // (fewer than 5 sessions / 24h) that wouldn't trigger shouldDream().
     if (dreamState.pendingEvaluation) {
       const evalResult = await evaluatePendingExperiment(dreamState);
       if (evalResult !== null) {
@@ -848,13 +850,8 @@ async function runHeartbeat(
         log(`[dream] hill-climbing evaluation: ${evalResult ? "KEEP" : "REVERT"}`);
       }
     }
-  } catch (err) {
-    logError("[dream] hill-climbing evaluation failed", err);
-  }
 
-  // autoDream: check if memory consolidation should run
-  try {
-    const dreamState = await loadDreamState();
+    // autoDream: check if memory consolidation should run
     if (shouldDream(dreamState)) {
       log("[dream] trigger conditions met, starting autoDream...");
       await runDream();
@@ -868,7 +865,7 @@ async function runHeartbeat(
       }
     }
   } catch (err) {
-    logError("[dream] autoDream failed", err);
+    logError("[dream] autoDream/hill-climbing failed", err);
   }
 }
 

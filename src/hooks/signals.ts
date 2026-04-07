@@ -26,7 +26,11 @@ export interface SessionSignal {
 
 const SIGNAL_PREFIX = "<!-- SIGNAL:";
 const SIGNAL_SUFFIX = " -->";
-const SIGNAL_REGEX = /<!-- SIGNAL:(\{.*?\}) -->/g;
+
+/** Create a fresh regex each call to avoid /g lastIndex state leaks. */
+function signalRegex(): RegExp {
+  return /<!-- SIGNAL:(\{.*?\}) -->/g;
+}
 
 export async function appendSessionSignal(signal: SessionSignal): Promise<void> {
   const now = new Date();
@@ -54,10 +58,9 @@ export async function loadRecentSignals(days: number): Promise<SessionSignal[]> 
 
     try {
       const content = await readFile(filePath, "utf-8");
+      const re = signalRegex();
       let match: RegExpExecArray | null;
-      // Reset lastIndex since we reuse the regex
-      SIGNAL_REGEX.lastIndex = 0;
-      while ((match = SIGNAL_REGEX.exec(content)) !== null) {
+      while ((match = re.exec(content)) !== null) {
         try {
           const parsed = JSON.parse(match[1]!) as Record<string, unknown>;
           // Validate required fields to guard against corrupted/stale markers
