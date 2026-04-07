@@ -15,7 +15,9 @@ JUNECLAW_DIR="/Users/jp/JuneClaw"
 JUNECLAW_DIST="$JUNECLAW_DIR/dist/index.js"
 JUNECLAW_LOG="$HOME/.juneclaw/logs/daemon.log"
 JUNECLAW_PID="$HOME/.juneclaw/daemon.pid"
+JUNECLAW_LOCK="$HOME/.juneclaw/daemon.lock"
 JUNECLAW_SESSIONS="$HOME/.juneclaw/sessions.json"
+PLIST_LABEL="ai.juneclaw.daemon"
 
 cmd="${1:-}"
 
@@ -53,18 +55,26 @@ for p in d.values():
 
   restart)
     echo "Restarting JuneClaw daemon..."
-    # Kill existing
+    # Kill existing processes and clean up lock
     pkill -f "JuneClaw/dist/index" 2>/dev/null || true
     pkill -f "remote-control.*juneclaw" 2>/dev/null || true
     pkill -f "progress-monitor.sh" 2>/dev/null || true
     sleep 2
-    rm -f "$JUNECLAW_PID"
-    # Build and start
+    rm -f "$JUNECLAW_PID" "$JUNECLAW_LOCK"
+    # Build
     cd "$JUNECLAW_DIR" && npm run build --silent 2>/dev/null
-    node "$JUNECLAW_DIST" >> "$JUNECLAW_LOG" 2>&1 &
-    echo "JuneClaw started (PID: $!)"
+    # Restart via launchctl (single restart authority)
+    launchctl kickstart -k "gui/$(id -u)/$PLIST_LABEL" 2>/dev/null \
+      || {
+        echo "launchctl kickstart failed — direct start"
+        node "$JUNECLAW_DIST" >> "$JUNECLAW_LOG" 2>&1 &
+      }
     sleep 3
-    grep -E "(daemon started|Connected)" "$JUNECLAW_LOG" | tail -2
+    if [ -f "$JUNECLAW_PID" ]; then
+      echo "JuneClaw started (PID: $(cat "$JUNECLAW_PID"))"
+    else
+      echo "JuneClaw restart requested"
+    fi
     ;;
 
   status)
@@ -106,7 +116,7 @@ for phone, types in d.items():
     pkill -9 -f "JuneClaw/dist/index" 2>/dev/null || true
     pkill -9 -f "remote-control.*juneclaw" 2>/dev/null || true
     pkill -9 -f "progress-monitor.sh" 2>/dev/null || true
-    rm -f "$JUNECLAW_PID"
+    rm -f "$JUNECLAW_PID" "$JUNECLAW_LOCK"
     echo "Done."
     ;;
 

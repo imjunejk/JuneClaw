@@ -1,8 +1,13 @@
 #!/bin/bash
 # watchdog.sh — JuneClaw emergency recovery
 # Runs via cron every 2 minutes:
-#   1. Check if daemon is alive → restart if dead
-#   2. Check iMessage for "restart juneclaw" → force restart
+#   1. Check if daemon is alive → restart via launchctl if dead
+#   2. Kill orphan child processes
+#   3. Check iMessage for "restart juneclaw" → force restart via launchctl
+#
+# IMPORTANT: This script never spawns the daemon directly.
+# All restarts go through launchctl to prevent multiple restart sources
+# racing against each other (launchd KeepAlive, watchdog, self-heal).
 #
 # crontab: */2 * * * * /Users/jp/JuneClaw/tools/watchdog.sh >> ~/.juneclaw/logs/watchdog.log 2>&1
 
@@ -10,8 +15,8 @@ set -uo pipefail
 
 JUNECLAW_DIR="/Users/jp/JuneClaw"
 JUNECLAW_PID="$HOME/.juneclaw/daemon.pid"
-JUNECLAW_LOG="$HOME/.juneclaw/logs/daemon.log"
-JUNECLAW_DIST="$JUNECLAW_DIR/dist/index.js"
+JUNECLAW_LOCK="$HOME/.juneclaw/daemon.lock"
+PLIST_LABEL="ai.juneclaw.daemon"
 IMSG="/opt/homebrew/bin/imsg"
 JUNE_PHONE="+12139992143"
 CHAT_ID=1
@@ -29,22 +34,35 @@ is_daemon_alive() {
   return 1
 }
 
+# Restart via launchctl — single restart authority
 restart_daemon() {
-  echo "[$(ts)] Restarting JuneClaw daemon..."
-  pkill -f "dist/index\\.js" 2>/dev/null || true
+  echo "[$(ts)] Restarting JuneClaw via launchctl..."
+
+  # Kill orphan children first (remote-control, progress-monitor)
   pkill -f "remote-control.*juneclaw" 2>/dev/null || true
   pkill -f "progress-monitor.sh" 2>/dev/null || true
-  sleep 2
-  rm -f "$JUNECLAW_PID"
-  cd "$JUNECLAW_DIR" && node "$JUNECLAW_DIST" >> "$JUNECLAW_LOG" 2>&1 &
-  echo "[$(ts)] JuneClaw restarted (PID: $!)"
-  # Notify via iMessage
-  $IMSG send --to "$JUNE_PHONE" --text "[Watchdog] JuneClaw 재시작 완료 (PID: $!)" 2>/dev/null || true
+
+  # Remove stale lock/pid files so the new daemon can start cleanly
+  rm -f "$JUNECLAW_PID" "$JUNECLAW_LOCK"
+
+  # Restart through launchd (the ONLY restart path)
+  launchctl kickstart -k "gui/$(id -u)/$PLIST_LABEL" 2>/dev/null \
+    || launchctl kickstart "gui/$(id -u)/$PLIST_LABEL" 2>/dev/null \
+    || {
+      echo "[$(ts)] launchctl kickstart failed — trying bootout+bootstrap"
+      local plist="$HOME/Library/LaunchAgents/$PLIST_LABEL.plist"
+      launchctl bootout "gui/$(id -u)/$PLIST_LABEL" 2>/dev/null || true
+      sleep 1
+      launchctl bootstrap "gui/$(id -u)" "$plist" 2>/dev/null || true
+    }
+
+  echo "[$(ts)] JuneClaw restart requested via launchctl"
+  $IMSG send --to "$JUNE_PHONE" --text "[Watchdog] JuneClaw 재시작 요청됨 (launchctl)" 2>/dev/null || true
 }
 
 # 1. Check daemon health
 if ! is_daemon_alive; then
-  echo "[$(ts)] Daemon not running — auto-restarting"
+  echo "[$(ts)] Daemon not running — restarting via launchctl"
   restart_daemon
   exit 0
 fi

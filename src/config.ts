@@ -99,6 +99,7 @@ export const config = {
     logs: join(home, ".juneclaw", "logs"),
     statePath: join(home, ".juneclaw", "state.json"),
     pidFile: join(home, ".juneclaw", "daemon.pid"),
+    daemonLock: join(home, ".juneclaw", "daemon.lock"),
     watchdogState: join(home, ".juneclaw", "watchdog-state.txt"),
     dreamState: join(home, ".juneclaw", "dream-state.json"),
     tunerState: join(home, ".juneclaw", "tuner-state.json"),
