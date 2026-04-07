@@ -190,10 +190,13 @@ export async function executeRotation(
     ? `Tokens: ${s.lastUsage.totalTokens.toLocaleString()} / ${s.lastUsage.contextWindow.toLocaleString()} (${s.lastUsage.usagePercent.toFixed(1)}%), Cost: $${s.lastUsage.costUSD.toFixed(4)}`
     : "No usage data";
 
-  await writeHandoff({
-    reason: `context rotation: ${reason}`,
-    progress: `Messages: ${s.messageCount}, Errors: ${s.consecutiveErrors}, Peak usage: ${s.peakUsagePercent.toFixed(1)}%, Cumulative tokens: ${s.cumulativeTokens.toLocaleString()}. ${usageSummary}`,
-  });
+  // Skip basic handoff if smart handoff already wrote HANDOFF.md
+  if (!s.handoffDone) {
+    await writeHandoff({
+      reason: `context rotation: ${reason}`,
+      progress: `Messages: ${s.messageCount}, Errors: ${s.consecutiveErrors}, Peak usage: ${s.peakUsagePercent.toFixed(1)}%, Cumulative tokens: ${s.cumulativeTokens.toLocaleString()}. ${usageSummary}`,
+    });
+  }
 
   await clearSessionId(phone, taskType);
 

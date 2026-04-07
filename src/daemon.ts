@@ -711,10 +711,16 @@ async function processMessage(
       if (pending) pending.forceRotated = true;
       log(`[context-rotation] triggered after processing: ${postReason}`);
 
-      // Attempt smart handoff even during forced rotation (if session exists and handoff not yet done)
-      const pct = result.usage?.usagePercent.toFixed(0) ?? "?";
-      if (!isHandoffDone(phone) && result.sessionId && postReason === "token_threshold") {
-        log(`[handoff] forced rotation at ${pct}% — attempting smart handoff first`);
+      // Attempt smart handoff before forced rotation (only if session alive enough to respond)
+      const pct = result.usage?.usagePercent ?? 0;
+      const pctStr = pct ? pct.toFixed(0) : "?";
+      if (
+        !isHandoffDone(phone)
+        && result.sessionId
+        && postReason === "token_threshold"
+        && pct < 95
+      ) {
+        log(`[handoff] forced rotation at ${pctStr}% — attempting smart handoff first`);
         try {
           const handoffResult = await writeSmartHandoff(result.sessionId);
           if (handoffResult.usage) {
@@ -722,33 +728,21 @@ async function processMessage(
           }
           markHandoffDone(phone);
           log("[handoff] smart handoff succeeded during forced rotation");
-          await clearSessionId(phone, taskType);
-          await appendSystemLog(
-            `Smart handoff during forced rotation for ${phone} (${taskType}): context ${pct}%`,
-          );
-          resetRotationState(phone);
-          await emit("rotation:triggered", { reason: "smart_handoff" });
-          await channel.sendMessage(
-            `Context rotation (컨텍스트 ${pct}% 도달). ${taskType} 세션이 리셋됩니다.`,
-          );
         } catch (err) {
           logError("[handoff] smart handoff failed during forced rotation, falling back to basic", err);
-          await executeRotation(phone, postReason, taskType);
-          await emit("rotation:triggered", { reason: postReason });
-          await channel.sendMessage(
-            `Context rotation (컨텍스트 ${pct}% 도달). ${taskType} 세션이 리셋됩니다.`,
-          );
         }
-      } else {
-        await executeRotation(phone, postReason, taskType);
-        await emit("rotation:triggered", { reason: postReason });
-        const label = postReason === "token_threshold"
-          ? `컨텍스트 ${pct}% 도달`
-          : `세션 메시지 한도`;
-        await channel.sendMessage(
-          `Context rotation (${label}). ${taskType} 세션이 리셋됩니다.`,
-        );
       }
+
+      // Always go through executeRotation for consistent cleanup
+      // (skips writeHandoff internally if smart handoff already succeeded)
+      await executeRotation(phone, postReason, taskType);
+      await emit("rotation:triggered", { reason: postReason });
+      const label = postReason === "token_threshold"
+        ? `컨텍스트 ${pctStr}% 도달`
+        : `세션 메시지 한도`;
+      await channel.sendMessage(
+        `Context rotation (${label}). ${taskType} 세션이 리셋됩니다.`,
+      );
     }
   } catch (err) {
     recordError(phone);
