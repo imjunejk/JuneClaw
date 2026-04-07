@@ -46,6 +46,10 @@ import {
   shouldDream,
   runDream,
 } from "./memory/dream.js";
+import { scoreExchange, scoreError, type ExchangeMetrics } from "./hooks/quality-scorer.js";
+import { appendScore, type LedgerEntry } from "./hooks/score-ledger.js";
+import { currentStrategyHash, incrementTunerExchangeCount, runStrategyTuner } from "./memory/strategy-tuner.js";
+import { runFailureClassification, needsReclassification } from "./hooks/failure-classifier.js";
 import { DurableQueue } from "./lib/durable-queue.js";
 import { WorkerPool } from "./lib/worker-pool.js";
 import { atomicWriteFile } from "./lib/atomic-file.js";
@@ -82,6 +86,24 @@ let quietHoursOverrideUntil: number = 0;
 
 const processedIds = new Set<number>();
 const btwQueue: string[] = [];
+
+// ── Self-improvement: per-phone exchange tracking for quality scoring ──
+interface PendingExchange {
+  userMessage: string;
+  taskType: TaskType;
+  model: string;
+  tokens: number;
+  costUSD: number;
+  numTurns: number;
+  wasRetry: boolean;
+  timedOut: boolean;
+  forceRotated: boolean;
+  usagePercent: number;
+  strategyHash: string;
+  timestamp: string;
+}
+
+const pendingExchanges = new Map<string, PendingExchange>();
 let monitorProcess: ChildProcess | null = null;
 let monitorStopped = false;
 let remoteControlProcess: ChildProcess | null = null;
@@ -409,12 +431,58 @@ function isQuietHour(ch: ChannelConfig): boolean {
   return hour >= start && hour < end;
 }
 
+/**
+ * Score the previous exchange for a phone (if any) using the new user
+ * message as the follow-up signal, then log to the score ledger.
+ */
+async function scorePreviousExchange(phone: string, followUpMessage: string): Promise<void> {
+  const pending = pendingExchanges.get(phone);
+  if (!pending) return;
+  pendingExchanges.delete(phone);
+
+  try {
+    const metrics: ExchangeMetrics = {
+      wasRetry: pending.wasRetry,
+      timedOut: pending.timedOut,
+      forceRotated: pending.forceRotated,
+      usagePercent: pending.usagePercent,
+      costUSD: pending.costUSD,
+      numTurns: pending.numTurns,
+    };
+    const result = scoreExchange(followUpMessage, metrics);
+
+    const entry: LedgerEntry = {
+      timestamp: pending.timestamp,
+      taskType: pending.taskType,
+      model: pending.model,
+      score: result.score,
+      tokens: pending.tokens,
+      costUSD: pending.costUSD,
+      signals: result.signals,
+      strategyHash: pending.strategyHash,
+    };
+    await appendScore(entry);
+    await incrementTunerExchangeCount();
+    await emit("quality:scored", { score: result.score, taskType: pending.taskType });
+    log(`[quality] scored ${pending.taskType}: ${result.score.toFixed(2)} [${result.signals.join(",")}]`);
+  } catch (err) {
+    // Best-effort — never block message processing
+    log(`[quality] scoring failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
 /** Handle a quick-lane message: non-blocking, no session, fire-and-forget. */
 async function processQuickMessage(
   channel: Channel,
   name: string,
+  phone: string,
   text: string,
 ): Promise<void> {
+  // Score previous heavy exchange using this quick message as follow-up
+  scorePreviousExchange(phone, text).catch((err) => {
+    log(`[quality] background scoring failed: ${err instanceof Error ? err.message : String(err)}`);
+  });
+
   log(`[quick] responding to: ${text.slice(0, 60)}...`);
   try {
     const response = await quickRespond(text);
@@ -437,6 +505,11 @@ async function processMessage(
   const phone = channelConfig.phone;
   const name = channelConfig.name;
   await emit("message:received", { from: name });
+
+  // Score previous exchange using this new message as the follow-up signal (fire-and-forget)
+  scorePreviousExchange(phone, text).catch((err) => {
+    log(`[quality] background scoring failed: ${err instanceof Error ? err.message : String(err)}`);
+  });
 
   if (quietMode.get(phone)) {
     log(`[quiet] skipping message from ${name}`);
@@ -465,7 +538,7 @@ async function processMessage(
 
   // Quick lane: fire-and-forget, no session needed
   if (taskType === "quick") {
-    await processQuickMessage(channel, name, text);
+    await processQuickMessage(channel, name, phone, text);
     return;
   }
 
@@ -566,6 +639,23 @@ async function processMessage(
     // Record exchange for cross-session context bridge
     recordExchange(text, result.response, taskType);
 
+    // Store exchange for quality scoring on next user message
+    const stratHash = await currentStrategyHash(taskType);
+    pendingExchanges.set(phone, {
+      userMessage: text,
+      taskType,
+      model: model ?? config.claude.modelRouting[taskType],
+      tokens: result.usage?.totalTokens ?? 0,
+      costUSD: result.usage?.costUSD ?? 0,
+      numTurns: result.usage?.numTurns ?? 1,
+      wasRetry: false,
+      timedOut: false,
+      forceRotated: false,
+      usagePercent: result.usage?.usagePercent ?? 0,
+      strategyHash: stratHash,
+      timestamp: new Date().toISOString(),
+    });
+
     // Update shared context on significant task completions
     if (taskType === "coding" || taskType === "research") {
       const summary = result.response.slice(0, 100).replace(/\n/g, " ");
@@ -618,6 +708,9 @@ async function processMessage(
     // Phase 3: Force rotation (90%)
     const postReason = shouldRotate(phone);
     if (postReason) {
+      // Mark the pending exchange as force-rotated for quality scoring
+      const pending = pendingExchanges.get(phone);
+      if (pending) pending.forceRotated = true;
       log(`[context-rotation] triggered after processing: ${postReason}`);
       await executeRotation(phone, postReason, taskType);
       await emit("rotation:triggered", { reason: postReason });
@@ -644,6 +737,23 @@ async function processMessage(
       tokenCount: 0,
       durationMs: Date.now() - sessionStartMs,
     }).catch(() => {}); // best-effort
+
+    // Score this as a failed exchange for the quality ledger
+    try {
+      const errScore = scoreError(errMsg);
+      const stratHash = await currentStrategyHash(taskType);
+      await appendScore({
+        timestamp: new Date().toISOString(),
+        taskType,
+        model: model ?? config.claude.modelRouting[taskType],
+        score: errScore.score,
+        tokens: 0,
+        costUSD: 0,
+        signals: errScore.signals,
+        strategyHash: stratHash,
+      });
+      await incrementTunerExchangeCount();
+    } catch { /* best-effort */ }
 
     if (
       err instanceof Error &&
@@ -717,6 +827,14 @@ async function runHeartbeat(
     if (shouldDream(dreamState)) {
       log("[dream] trigger conditions met, starting autoDream...");
       await runDream();
+
+      // Run strategy tuner after dream consolidation
+      log("[tuner] running strategy tuner after dream...");
+      try {
+        await runStrategyTuner();
+      } catch (tunerErr) {
+        logError("[tuner] strategy tuner failed", tunerErr);
+      }
     }
   } catch (err) {
     logError("[dream] autoDream failed", err);
@@ -760,6 +878,26 @@ function initCronScheduler(channel: Channel, channelConfig: ChannelConfig): void
     }
   });
 
+  addJob("failureClassification", config.cron.schedules.failureClassification!, async () => {
+    log("[cron] running failure classification...");
+    await emit("cron:started", { job: "failureClassification" });
+    try {
+      const needsUpdate = await needsReclassification();
+      if (needsUpdate) {
+        const clusters = await runFailureClassification();
+        log(`[cron] failure classification completed: ${clusters.length} categories`);
+        await emit("failures:classified", { categories: clusters.length });
+      } else {
+        log("[cron] failure classification skipped — no new incidents");
+      }
+      await emit("cron:completed", { job: "failureClassification" });
+    } catch (err) {
+      logError("[cron] failure classification failed", err);
+      await logFromError(err, "cron:failureClassification");
+      await emit("cron:failed", { job: "failureClassification", error: String(err) });
+    }
+  });
+
   log("[cron] scheduler initialized");
 }
 
@@ -771,6 +909,7 @@ async function ensureWorkspaceDirs(): Promise<void> {
   await mkdir(join(ws, "memory", "lessons"), { recursive: true });
   await mkdir(join(ws, "memory", "topics"), { recursive: true });
   await mkdir(join(ws, "strategies"), { recursive: true });
+  await mkdir(join(ws, "memory", "strategy-versions"), { recursive: true });
   await mkdir(join(ws, "tools"), { recursive: true });
   await mkdir(join(ws, "skills"), { recursive: true });
 }
@@ -893,7 +1032,7 @@ export async function startDaemon(): Promise<void> {
 
         // Quick lane: process immediately even if heavy work is ongoing
         if (taskType === "quick") {
-          processQuickMessage(channel, ch.name, msg.text).catch((err) => {
+          processQuickMessage(channel, ch.name, ch.phone, msg.text).catch((err) => {
             logError("[quick] fire-and-forget failed", err);
           });
           continue;
