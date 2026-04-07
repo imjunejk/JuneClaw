@@ -1,0 +1,134 @@
+#!/bin/bash
+# jc — JuneClaw CLI helper
+# Usage:
+#   jc              → 새 Claude 세션 (bypass permissions)
+#   jc resume       → 마지막 세션 이어가기
+#   jc remote       → 추가 remote-control 세션 열기
+#   jc restart      → 데몬 재시작
+#   jc status       → 데몬 + 세션 상태
+#   jc kill         → 데몬 + 모든 관련 프로세스 종료
+#   jc logs         → 최근 로그 tail
+
+set -euo pipefail
+
+JUNECLAW_DIR="/Users/jp/JuneClaw"
+JUNECLAW_DIST="$JUNECLAW_DIR/dist/index.js"
+JUNECLAW_LOG="$HOME/.juneclaw/logs/daemon.log"
+JUNECLAW_PID="$HOME/.juneclaw/daemon.pid"
+JUNECLAW_SESSIONS="$HOME/.juneclaw/sessions.json"
+
+cmd="${1:-}"
+
+case "$cmd" in
+  resume)
+    # 마지막 세션 이어가기
+    if [ -f "$JUNECLAW_SESSIONS" ]; then
+      session_id=$(python3 -c "
+import json
+with open('$JUNECLAW_SESSIONS') as f:
+    d = json.load(f)
+for p in d.values():
+    for e in p.values():
+        print(e['sessionId'])
+        break
+    break
+" 2>/dev/null || true)
+      if [ -n "$session_id" ]; then
+        echo "Resuming session: $session_id"
+        cd "$JUNECLAW_DIR" && exec claude --dangerously-skip-permissions --resume "$session_id"
+      fi
+    fi
+    echo "No active session found. Starting new session."
+    cd "$JUNECLAW_DIR" && exec claude --dangerously-skip-permissions
+    ;;
+
+  remote)
+    # 추가 remote-control 세션 (bypass permissions)
+    name="${2:-juneclaw-extra}"
+    echo "Opening remote-control session: $name"
+    cd "$JUNECLAW_DIR" && exec claude remote-control \
+      --permission-mode bypassPermissions \
+      --name "$name"
+    ;;
+
+  restart)
+    echo "Restarting JuneClaw daemon..."
+    # Kill existing
+    pkill -f "JuneClaw/dist/index" 2>/dev/null || true
+    pkill -f "remote-control.*juneclaw" 2>/dev/null || true
+    pkill -f "progress-monitor.sh" 2>/dev/null || true
+    sleep 2
+    rm -f "$JUNECLAW_PID"
+    # Build and start
+    cd "$JUNECLAW_DIR" && npm run build --silent 2>/dev/null
+    node "$JUNECLAW_DIST" >> "$JUNECLAW_LOG" 2>&1 &
+    echo "JuneClaw started (PID: $!)"
+    sleep 3
+    grep -E "(daemon started|Connected)" "$JUNECLAW_LOG" | tail -2
+    ;;
+
+  status)
+    echo "=== Daemon ==="
+    if [ -f "$JUNECLAW_PID" ]; then
+      pid=$(cat "$JUNECLAW_PID")
+      if kill -0 "$pid" 2>/dev/null; then
+        echo "  Running (PID: $pid)"
+      else
+        echo "  Dead (stale PID: $pid)"
+      fi
+    else
+      echo "  Not running"
+    fi
+
+    echo "=== Sessions ==="
+    if [ -f "$JUNECLAW_SESSIONS" ]; then
+      python3 -c "
+import json
+with open('$JUNECLAW_SESSIONS') as f:
+    d = json.load(f)
+for phone, types in d.items():
+    for tt, e in types.items():
+        print(f'  {tt}: {e[\"sessionId\"][:8]}... ({e[\"messageCount\"]}msgs, {e[\"model\"]})')
+" 2>/dev/null || echo "  (parse error)"
+    else
+      echo "  No sessions"
+    fi
+
+    echo "=== Remote Control ==="
+    pgrep -c -f "remote-control.*juneclaw" 2>/dev/null | xargs -I{} echo "  {} session(s)" || echo "  None"
+
+    echo "=== Progress Monitor ==="
+    pgrep -c -f "progress-monitor" 2>/dev/null | xargs -I{} echo "  {} process(es)" || echo "  None"
+    ;;
+
+  kill)
+    echo "Killing all JuneClaw processes..."
+    pkill -9 -f "JuneClaw/dist/index" 2>/dev/null || true
+    pkill -9 -f "remote-control.*juneclaw" 2>/dev/null || true
+    pkill -9 -f "progress-monitor.sh" 2>/dev/null || true
+    rm -f "$JUNECLAW_PID"
+    echo "Done."
+    ;;
+
+  logs)
+    tail -f "$JUNECLAW_LOG"
+    ;;
+
+  help|-h|--help)
+    echo "jc — JuneClaw CLI helper"
+    echo ""
+    echo "Commands:"
+    echo "  jc              새 Claude 세션 열기 (bypass permissions)"
+    echo "  jc resume       마지막 세션 이어가기"
+    echo "  jc remote [name] 추가 remote-control 세션"
+    echo "  jc restart      데몬 재시작"
+    echo "  jc status       상태 확인"
+    echo "  jc kill         전체 종료"
+    echo "  jc logs         로그 tail"
+    ;;
+
+  *)
+    # 기본: 새 세션 열기
+    cd "$JUNECLAW_DIR" && exec claude --dangerously-skip-permissions
+    ;;
+esac
