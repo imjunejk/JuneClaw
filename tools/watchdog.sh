@@ -113,4 +113,18 @@ if [ -n "$recent" ]; then
   fi
 fi
 
+# 4. Check for auth errors in recent logs (last 5 minutes)
+AUTH_ALERT_FILE="$HOME/.juneclaw/.auth-alert-sent"
+if grep -q "authentication_error\|401\|not logged in\|please run /login" ~/.juneclaw/logs/daemon.log 2>/dev/null; then
+  # Only check recent lines (last 50)
+  if tail -50 ~/.juneclaw/logs/daemon.log | grep -qi "authentication_error\|Invalid authentication credentials"; then
+    # Don't spam — only alert once per hour
+    if [ ! -f "$AUTH_ALERT_FILE" ] || [ "$(( $(date +%s) - $(stat -f%m "$AUTH_ALERT_FILE" 2>/dev/null || echo 0) ))" -gt 3600 ]; then
+      echo "[$(ts)] Auth error detected!"
+      touch "$AUTH_ALERT_FILE"
+      $IMSG send --to "$JUNE_PHONE" --text "[JuneClaw] 인증 만료됨. SSH 접속 후 'claude setup-token' 또는 'claude auth login' 실행 필요." 2>/dev/null || true
+    fi
+  fi
+fi
+
 echo "[$(ts)] OK — daemon alive"
