@@ -1,7 +1,9 @@
 import { readFile } from "node:fs/promises";
+import { join } from "node:path";
+import { homedir } from "node:os";
 import { config } from "../config.js";
 import { AsyncMutex } from "../lib/async-mutex.js";
-import { atomicWriteFile } from "../lib/atomic-file.js";
+import { atomicWriteFile, atomicWriteJson } from "../lib/atomic-file.js";
 
 interface Exchange {
   question: string;
@@ -10,8 +12,35 @@ interface Exchange {
   timestamp: number;
 }
 
+/** Path to the persisted recent exchanges file. */
+const EXCHANGES_PATH = join(homedir(), ".juneclaw", "recent-exchanges.json");
+
+/** Mutex for recent exchanges disk I/O. */
+const exchangesMutex = new AsyncMutex();
+
 /** In-memory recent exchange buffer — shared across all sessions. */
 const recentExchanges: Exchange[] = [];
+
+/** Load persisted exchanges from disk (call once at daemon startup). */
+export async function loadRecentExchanges(): Promise<void> {
+  try {
+    const raw = await readFile(EXCHANGES_PATH, "utf-8");
+    const parsed: Exchange[] = JSON.parse(raw);
+    recentExchanges.length = 0;
+    for (const ex of parsed) {
+      recentExchanges.push(ex);
+    }
+  } catch {
+    // No file or parse error — start fresh
+  }
+}
+
+/** Persist current exchanges to disk (best-effort, non-blocking to caller). */
+function persistExchanges(): void {
+  exchangesMutex
+    .run(() => atomicWriteJson(EXCHANGES_PATH, recentExchanges))
+    .catch(() => {}); // best-effort — don't let disk errors break message flow
+}
 
 /** Record a Q&A exchange (called after each successful response). */
 export function recordExchange(
@@ -29,6 +58,9 @@ export function recordExchange(
   while (recentExchanges.length > max) {
     recentExchanges.shift();
   }
+
+  // Persist to disk so exchanges survive daemon restarts
+  persistExchanges();
 }
 
 /** Get recent exchanges formatted for system prompt injection. */
@@ -88,4 +120,5 @@ export async function getSharedContext(): Promise<string | null> {
 /** Clear the recent exchange buffer (e.g., on full session reset). */
 export function clearRecentExchanges(): void {
   recentExchanges.length = 0;
+  persistExchanges();
 }

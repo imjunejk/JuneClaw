@@ -145,6 +145,10 @@ export function markHandoffDone(phone: string): void {
   getState(phone).handoffDone = true;
 }
 
+export function isHandoffDone(phone: string): boolean {
+  return getState(phone).handoffDone;
+}
+
 export function getMessageCount(phone: string): number {
   return getState(phone).messageCount;
 }

@@ -11,7 +11,7 @@ import { runClaude } from "./agent/runner.js";
 import { getSessionId, setSessionId, clearSessionId, cleanupExpiredSessions } from "./agent/session.js";
 import { classifyTask, getModelForTask } from "./agent/classifier.js";
 import { quickRespond } from "./agent/quick-responder.js";
-import { recordExchange, getRecentContext, appendSharedContext, getSharedContext } from "./agent/context-bridge.js";
+import { recordExchange, getRecentContext, appendSharedContext, getSharedContext, loadRecentExchanges } from "./agent/context-bridge.js";
 import { buildSystemPrompt } from "./memory/loader.js";
 import { appendDailyLog, appendSystemLog } from "./memory/writer.js";
 import { addJob, stopAll as stopAllCron } from "./scheduler/cron.js";
@@ -31,6 +31,7 @@ import {
   shouldWarnContext,
   shouldHandoff,
   markHandoffDone,
+  isHandoffDone,
   executeRotation,
   resetRotationState,
   getMessageCount,
@@ -709,14 +710,45 @@ async function processMessage(
       const pending = pendingExchanges.get(phone);
       if (pending) pending.forceRotated = true;
       log(`[context-rotation] triggered after processing: ${postReason}`);
-      await executeRotation(phone, postReason, taskType);
-      await emit("rotation:triggered", { reason: postReason });
-      const label = postReason === "token_threshold"
-        ? `컨텍스트 ${result.usage?.usagePercent.toFixed(0) ?? "?"}% 도달`
-        : `세션 메시지 한도`;
-      await channel.sendMessage(
-        `Context rotation (${label}). ${taskType} 세션이 리셋됩니다.`,
-      );
+
+      // Attempt smart handoff even during forced rotation (if session exists and handoff not yet done)
+      const pct = result.usage?.usagePercent.toFixed(0) ?? "?";
+      if (!isHandoffDone(phone) && result.sessionId && postReason === "token_threshold") {
+        log(`[handoff] forced rotation at ${pct}% — attempting smart handoff first`);
+        try {
+          const handoffResult = await writeSmartHandoff(result.sessionId);
+          if (handoffResult.usage) {
+            recordUsage(phone, handoffResult.usage);
+          }
+          markHandoffDone(phone);
+          log("[handoff] smart handoff succeeded during forced rotation");
+          await clearSessionId(phone, taskType);
+          await appendSystemLog(
+            `Smart handoff during forced rotation for ${phone} (${taskType}): context ${pct}%`,
+          );
+          resetRotationState(phone);
+          await emit("rotation:triggered", { reason: "smart_handoff" });
+          await channel.sendMessage(
+            `Context rotation (컨텍스트 ${pct}% 도달). ${taskType} 세션이 리셋됩니다.`,
+          );
+        } catch (err) {
+          logError("[handoff] smart handoff failed during forced rotation, falling back to basic", err);
+          await executeRotation(phone, postReason, taskType);
+          await emit("rotation:triggered", { reason: postReason });
+          await channel.sendMessage(
+            `Context rotation (컨텍스트 ${pct}% 도달). ${taskType} 세션이 리셋됩니다.`,
+          );
+        }
+      } else {
+        await executeRotation(phone, postReason, taskType);
+        await emit("rotation:triggered", { reason: postReason });
+        const label = postReason === "token_threshold"
+          ? `컨텍스트 ${pct}% 도달`
+          : `세션 메시지 한도`;
+        await channel.sendMessage(
+          `Context rotation (${label}). ${taskType} 세션이 리셋됩니다.`,
+        );
+      }
     }
   } catch (err) {
     recordError(phone);
@@ -942,6 +974,9 @@ async function ensureWorkspaceDirs(): Promise<void> {
 export async function startDaemon(): Promise<void> {
   await acquirePidLock();
   await ensureWorkspaceDirs();
+
+  // Restore recent exchanges from disk (survives daemon restart)
+  await loadRecentExchanges();
 
   const ch = config.channels.june;
   const channel = createIMessageChannel(ch.phone, ch.chatId);
