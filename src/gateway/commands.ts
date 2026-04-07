@@ -15,7 +15,7 @@ const execFileAsync = promisify(execFile);
 
 const ALGO_DIR = join(homedir(), "gwangsu-algo");
 const TRADE_EXECUTOR = join(ALGO_DIR, "trade_executor.py");
-const ALGO_PYTHON = join(ALGO_DIR, ".venv313", "bin", "python");
+const ALGO_PYTHON = join(ALGO_DIR, ".venv", "bin", "python");
 
 export interface CommandResult {
   handled: boolean;
@@ -260,9 +260,16 @@ async function runTradeExecutor(...cmdArgs: string[]): Promise<{ ok: boolean; [k
       timeout: 15_000,
       env: { ...process.env, PYTHONPATH: ALGO_DIR },
     });
-    return JSON.parse(stdout.trim());
+    try {
+      return JSON.parse(stdout.trim());
+    } catch {
+      return { ok: false, error: `trade_executor 응답 파싱 실패: ${stdout.slice(0, 200)}` };
+    }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes("ENOENT")) {
+      return { ok: false, error: "trade_executor.py 또는 Python venv를 찾을 수 없음" };
+    }
     return { ok: false, error: msg };
   }
 }
@@ -342,7 +349,7 @@ async function executeCommand(args: string[]): Promise<string> {
   }
 
   // 실행
-  const idsStr = args.join(",");
+  const idsStr = args.join(",").replace(/,+/g, ",").replace(/^,|,$/g, "");
   const result = await runTradeExecutor("actions", "execute", idsStr);
 
   if (!result.ok) return `❌ ${result.error}`;
