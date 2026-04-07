@@ -13,8 +13,8 @@
 
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { spawn } from "node:child_process";
 import { config } from "../config.js";
+import { spawnClaudePrint } from "../lib/claude-spawn.js";
 import { atomicWriteJson, atomicWriteFile } from "../lib/atomic-file.js";
 import { AsyncMutex } from "../lib/async-mutex.js";
 import { appendSystemLog } from "./writer.js";
@@ -117,56 +117,7 @@ async function loadMasterRules(): Promise<string> {
   }
 }
 
-function spawnClaudePrint(prompt: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const args = [
-      "--print",
-      "--model", config.dream.model,
-      "--permission-mode", config.claude.permissionMode,
-    ];
-
-    const child = spawn(config.claude.bin, args, {
-      stdio: ["pipe", "pipe", "pipe"],
-      env: { ...process.env, PATH: process.env.PATH ?? "" },
-    });
-
-    child.stdin.write(prompt, "utf-8");
-    child.stdin.end();
-
-    let stdout = "";
-    let stderr = "";
-
-    child.stdout.on("data", (chunk: Buffer) => {
-      stdout += chunk.toString();
-    });
-
-    child.stderr.on("data", (chunk: Buffer) => {
-      stderr += chunk.toString();
-    });
-
-    const timer = setTimeout(() => {
-      child.kill("SIGTERM");
-      setTimeout(() => {
-        try { child.kill("SIGKILL"); } catch { /* already dead */ }
-      }, 5_000);
-      reject(new Error("TIMEOUT: dream claude call exceeded time limit"));
-    }, config.dream.timeoutMs);
-
-    child.on("close", (code) => {
-      clearTimeout(timer);
-      if (code !== 0) {
-        reject(new Error(`dream claude exited ${code}: ${stderr.slice(0, 500)}`));
-      } else {
-        resolve(stdout);
-      }
-    });
-
-    child.on("error", (err) => {
-      clearTimeout(timer);
-      reject(err);
-    });
-  });
-}
+// spawnClaudePrint imported from lib/claude-spawn.ts
 
 /**
  * Format session metrics as a human-readable summary for the dream prompt.

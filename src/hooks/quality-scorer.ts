@@ -27,7 +27,8 @@ interface SignalWeight {
 
 const POSITIVE_FOLLOW_UP: SignalWeight[] = [
   { pattern: /(?:고마워|감사|땡큐|thanks|thx|thank you|ㄱㅅ|ㄳ|👍|잘\s*했)/i, delta: 0.2, label: "gratitude" },
-  { pattern: /(?:좋아|완벽|perfect|great|nice|좋[네은]|굿|잘\s*됐|ㅇㅋ|ㅇㅇ|넵|네네)/i, delta: 0.15, label: "acceptance" },
+  { pattern: /(?:좋아|완벽|perfect|great|nice|좋[네은]|굿|잘\s*됐)/i, delta: 0.15, label: "acceptance" },
+  { pattern: /(?:ㅇㅋ|ㅇㅇ|넵|네네|응응)/i, delta: 0.03, label: "acknowledgment" },
   { pattern: /(?:ㅋ{2,}|ㅎ{2,}|😂|🤣|😄)/i, delta: 0.05, label: "amusement" },
 ];
 

@@ -99,12 +99,15 @@ export async function readRecentScores(n: number): Promise<LedgerEntry[]> {
 /**
  * Compute the average score for a given strategy hash.
  * Returns null if no entries exist for that hash.
+ *
+ * Pass pre-loaded `entries` to avoid re-reading the file when computing
+ * multiple averages in the same cycle (e.g. strategy-tuner Phase A).
  */
-export async function averageScoreForStrategy(
+export function averageScoreForStrategy(
   strategyHash: string,
-  taskType?: string,
-): Promise<{ avg: number; count: number } | null> {
-  const entries = await readRecentScores(500);
+  taskType: string | undefined,
+  entries: LedgerEntry[],
+): { avg: number; count: number } | null {
   const filtered = entries.filter(
     (e) =>
       e.strategyHash === strategyHash &&

@@ -22,8 +22,8 @@
 import { readFile, readdir, copyFile, mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
-import { spawn } from "node:child_process";
 import { config, type TaskType } from "../config.js";
+import { spawnClaudePrint } from "../lib/claude-spawn.js";
 import { atomicWriteFile, atomicWriteJson } from "../lib/atomic-file.js";
 import { AsyncMutex } from "../lib/async-mutex.js";
 import { appendSystemLog } from "./writer.js";
@@ -184,61 +184,7 @@ async function pruneOldBackups(taskType: TaskType): Promise<void> {
   }
 }
 
-// ── Claude prompt for strategy improvement ──────────────────────────
-
-function spawnClaudePrint(prompt: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    let settled = false;
-
-    const args = [
-      "--print",
-      "--model", config.dream.model,
-      "--permission-mode", config.claude.permissionMode,
-    ];
-
-    const child = spawn(config.claude.bin, args, {
-      stdio: ["pipe", "pipe", "pipe"],
-      env: { ...process.env, PATH: process.env.PATH ?? "" },
-    });
-
-    child.stdin.write(prompt, "utf-8");
-    child.stdin.end();
-
-    let stdout = "";
-    let stderr = "";
-
-    child.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString(); });
-    child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
-
-    const timer = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      child.kill("SIGTERM");
-      setTimeout(() => {
-        try { child.kill("SIGKILL"); } catch { /* already dead */ }
-      }, 5_000);
-      reject(new Error("TIMEOUT: strategy-tuner claude call exceeded time limit"));
-    }, config.dream.timeoutMs);
-
-    child.on("close", (code) => {
-      clearTimeout(timer);
-      if (settled) return;
-      settled = true;
-      if (code !== 0) {
-        reject(new Error(`strategy-tuner claude exited ${code}: ${stderr.slice(0, 500)}`));
-      } else {
-        resolve(stdout);
-      }
-    });
-
-    child.on("error", (err) => {
-      clearTimeout(timer);
-      if (settled) return;
-      settled = true;
-      reject(err);
-    });
-  });
-}
+// spawnClaudePrint imported from lib/claude-spawn.ts
 
 // ── Core tuning logic ───────────────────────────────────────────────
 
@@ -297,8 +243,10 @@ export async function runStrategyTuner(): Promise<void> {
       state.targetTaskType &&
       state.exchangesSinceLastTune >= minEvalExchanges
     ) {
-      const oldStats = await averageScoreForStrategy(state.previousHash, state.targetTaskType);
-      const newStats = await averageScoreForStrategy(state.currentHash, state.targetTaskType);
+      // Read scores once for both comparisons
+      const allScores = await readRecentScores(500);
+      const oldStats = averageScoreForStrategy(state.previousHash, state.targetTaskType, allScores);
+      const newStats = averageScoreForStrategy(state.currentHash, state.targetTaskType, allScores);
 
       if (oldStats && newStats) {
         const improved = newStats.avg > oldStats.avg + scoreImprovementThreshold;
@@ -489,11 +437,26 @@ Output one block per file. Only include files you changed.`;
   });
 }
 
-/** Increment the exchange counter (called after each scored exchange). */
-export async function incrementTunerExchangeCount(): Promise<void> {
+/**
+ * In-memory counter for exchanges since last tune.
+ * Avoids reading/writing tuner-state.json on every single exchange.
+ * Flushed to disk periodically via flushExchangeCount().
+ */
+let pendingExchangeIncrements = 0;
+
+/** Increment the in-memory exchange counter (called after each scored exchange). */
+export function incrementTunerExchangeCount(): void {
+  pendingExchangeIncrements++;
+}
+
+/** Flush accumulated exchange increments to disk. Call from heartbeat. */
+export async function flushExchangeCount(): Promise<void> {
+  if (pendingExchangeIncrements === 0) return;
+  const count = pendingExchangeIncrements;
+  pendingExchangeIncrements = 0;
   await tunerMutex.run(async () => {
     const state = await loadTunerState();
-    state.exchangesSinceLastTune++;
+    state.exchangesSinceLastTune += count;
     await saveTunerState(state);
   });
 }

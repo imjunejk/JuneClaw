@@ -50,7 +50,7 @@ import {
 } from "./memory/dream.js";
 import { scoreExchange, scoreError, type ExchangeMetrics } from "./hooks/quality-scorer.js";
 import { appendScore, type LedgerEntry } from "./hooks/score-ledger.js";
-import { currentStrategyHash, incrementTunerExchangeCount, runStrategyTuner } from "./memory/strategy-tuner.js";
+import { currentStrategyHash, incrementTunerExchangeCount, flushExchangeCount, runStrategyTuner } from "./memory/strategy-tuner.js";
 import { runFailureClassification, needsReclassification } from "./hooks/failure-classifier.js";
 import { DurableQueue } from "./lib/durable-queue.js";
 import { WorkerPool } from "./lib/worker-pool.js";
@@ -464,7 +464,7 @@ async function scorePreviousExchange(phone: string, followUpMessage: string): Pr
       strategyHash: pending.strategyHash,
     };
     await appendScore(entry);
-    await incrementTunerExchangeCount();
+    incrementTunerExchangeCount();
     await emit("quality:scored", { score: result.score, taskType: pending.taskType });
     log(`[quality] scored ${pending.taskType}: ${result.score.toFixed(2)} [${result.signals.join(",")}]`);
   } catch (err) {
@@ -754,7 +754,7 @@ async function processMessage(
         signals: errScore.signals,
         strategyHash: stratHash,
       });
-      await incrementTunerExchangeCount();
+      incrementTunerExchangeCount();
     } catch { /* best-effort */ }
 
     if (
@@ -777,6 +777,19 @@ async function runHeartbeat(
   const now = new Date();
 
   log("[heartbeat] running...");
+
+  // Clean up stale pending exchanges (older than 10 minutes)
+  const staleThreshold = Date.now() - 10 * 60_000;
+  for (const [phone, pending] of pendingExchanges) {
+    if (new Date(pending.timestamp).getTime() < staleThreshold) {
+      pendingExchanges.delete(phone);
+    }
+  }
+
+  // Flush in-memory exchange counter to disk
+  await flushExchangeCount().catch((err) => {
+    log(`[heartbeat] exchange count flush failed: ${err instanceof Error ? err.message : String(err)}`);
+  });
 
   try {
     // Orphan detection + archive before heartbeat
