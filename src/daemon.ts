@@ -43,6 +43,8 @@ import {
 import {
   incrementSessionCount,
   loadDreamState,
+  saveDreamState,
+  evaluatePendingExperiment,
   shouldDream,
   runDream,
 } from "./memory/dream.js";
@@ -819,6 +821,22 @@ async function runHeartbeat(
     logError("[heartbeat] failed", err);
     await logFromError(err, "heartbeat");
     await emit("heartbeat:failed", { error: String(err) });
+  }
+
+  // Hill-climbing: evaluate pending experiment independently of dream gate.
+  // This ensures evaluations happen even when the daemon has low activity
+  // (fewer than 5 sessions / 24h) that wouldn't trigger shouldDream().
+  try {
+    const dreamState = await loadDreamState();
+    if (dreamState.pendingEvaluation) {
+      const evalResult = await evaluatePendingExperiment(dreamState);
+      if (evalResult !== null) {
+        await saveDreamState(dreamState);
+        log(`[dream] hill-climbing evaluation: ${evalResult ? "KEEP" : "REVERT"}`);
+      }
+    }
+  } catch (err) {
+    logError("[dream] hill-climbing evaluation failed", err);
   }
 
   // autoDream: check if memory consolidation should run

@@ -12,7 +12,7 @@ import { join, dirname } from "node:path";
 import { config, type TaskType } from "../config.js";
 import type { FailureCategory } from "./incident.js";
 
-export type SessionOutcome = "success" | "partial" | "failure";
+export type SessionOutcome = "success" | "failure";
 
 export interface SessionSignal {
   timestamp: string;
@@ -59,7 +59,16 @@ export async function loadRecentSignals(days: number): Promise<SessionSignal[]> 
       SIGNAL_REGEX.lastIndex = 0;
       while ((match = SIGNAL_REGEX.exec(content)) !== null) {
         try {
-          signals.push(JSON.parse(match[1]!) as SessionSignal);
+          const parsed = JSON.parse(match[1]!) as Record<string, unknown>;
+          // Validate required fields to guard against corrupted/stale markers
+          if (
+            typeof parsed.outcome === "string" &&
+            typeof parsed.taskType === "string" &&
+            typeof parsed.costUSD === "number" &&
+            typeof parsed.tokenCount === "number"
+          ) {
+            signals.push(parsed as unknown as SessionSignal);
+          }
         } catch {
           // Malformed signal line — skip
         }

@@ -39,16 +39,17 @@ export async function logIncident(incident: Incident): Promise<void> {
 export function inferCategory(msg: string): FailureCategory {
   const lower = msg.toLowerCase();
 
-  // Order matters: more specific patterns first, broader ones later.
-  // "cost limit" → cost_waste (not infrastructure), "context limit" → context_loss
-  if (lower.includes("timeout") || lower.includes("exceeded time limit") || lower.includes("sigterm") || lower.includes("circuit")) {
-    return "infrastructure";
+  // Order: most specific first, then broader categories.
+  // cost_waste and context_loss checked before infrastructure to avoid
+  // "context rotation timed out" being mis-classified as infrastructure.
+  if (lower.includes("cost") || lower.includes("budget") || /daily.*(limit|cap)/i.test(msg)) {
+    return "cost_waste";
   }
   if (lower.includes("context") || lower.includes("too long") || lower.includes("rotation")) {
     return "context_loss";
   }
-  if (lower.includes("cost") || lower.includes("budget") || /daily.*(limit|cap)/i.test(msg)) {
-    return "cost_waste";
+  if (lower.includes("timeout") || lower.includes("exceeded time limit") || lower.includes("sigterm") || lower.includes("circuit")) {
+    return "infrastructure";
   }
   return "uncategorized";
 }

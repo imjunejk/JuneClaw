@@ -11,7 +11,7 @@
  * - Failure taxonomy: feeds classified failure signals into analysis
  */
 
-import { readFile, readdir } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
 import { config } from "../config.js";
@@ -191,7 +191,7 @@ function formatMetricsSummary(metrics: SessionMetrics): string {
  * Evaluate the pending hill-climbing experiment from the previous dream.
  * Returns true if the changes were kept, false if reverted.
  */
-async function evaluatePendingExperiment(state: DreamState): Promise<boolean | null> {
+export async function evaluatePendingExperiment(state: DreamState): Promise<boolean | null> {
   const hc = config.dream.hillClimbing;
   if (!hc.enabled || !state.pendingEvaluation) return null;
 
@@ -207,23 +207,12 @@ async function evaluatePendingExperiment(state: DreamState): Promise<boolean | n
   const afterMetrics = computeMetricsFromSignals(signals);
   const beforeMetrics = pending.snapshotBefore;
 
-  // Insufficient data — keep changes (can't judge)
+  // Insufficient data — keep pendingEvaluation alive for re-evaluation next cycle
   if (afterMetrics.totalSessions < hc.minSessionsForEval) {
-    await appendMetrics({
-      timestamp: now.toISOString(),
-      dreamNumber: pending.dreamNumber,
-      period: {
-        from: new Date(now.getTime() - hc.evaluationWindowDays * 86400000).toISOString().split("T")[0]!,
-        to: now.toISOString().split("T")[0]!,
-      },
-      verdict: "insufficient_data",
-      metrics: afterMetrics,
-    });
     await appendSystemLog(
-      `autoDream: hill-climbing evaluation #${pending.dreamNumber} — insufficient data (${afterMetrics.totalSessions} sessions < ${hc.minSessionsForEval} minimum), keeping changes`,
+      `autoDream: hill-climbing evaluation #${pending.dreamNumber} — insufficient data (${afterMetrics.totalSessions} sessions < ${hc.minSessionsForEval} minimum), will retry next cycle`,
     );
-    state.pendingEvaluation = undefined;
-    return true;
+    return null; // don't clear pendingEvaluation — re-evaluate next dream
   }
 
   // Compare metrics
@@ -298,6 +287,8 @@ export async function runDream(): Promise<void> {
     const state = await loadDreamState();
 
     if (!shouldDream(state)) return;
+
+    const nowMs = Date.now();
 
     console.log("[dream] starting autoDream consolidation...");
     await appendSystemLog("autoDream: starting consolidation cycle");
@@ -420,17 +411,13 @@ Start directly with the markdown content.`;
 
     if (hc.enabled && useZones) {
       const previousMutable = extractMutableZone(currentRules, "dream-insights") ?? "";
-      // Cap stored content at 10KB to keep dream-state.json manageable
-      const cappedPrevious = previousMutable.length > 10_000
-        ? previousMutable.slice(0, 10_000)
-        : previousMutable;
 
-      const evalDate = new Date();
+      const evalDate = new Date(nowMs);
       evalDate.setDate(evalDate.getDate() + hc.evaluationWindowDays);
 
       state.pendingEvaluation = {
         dreamNumber: nextDreamNumber,
-        previousMutableContent: cappedPrevious,
+        previousMutableContent: previousMutable,
         snapshotBefore: currentMetrics,
         evaluateAfterDate: evalDate.toISOString().split("T")[0]!,
       };
@@ -442,17 +429,17 @@ Start directly with the markdown content.`;
 
     // 7. Log metrics snapshot
     await appendMetrics({
-      timestamp: new Date().toISOString(),
+      timestamp: new Date(nowMs).toISOString(),
       dreamNumber: nextDreamNumber,
       period: {
-        from: new Date(Date.now() - 3 * 86400000).toISOString().split("T")[0]!,
-        to: new Date().toISOString().split("T")[0]!,
+        from: new Date(nowMs - 3 * 86400000).toISOString().split("T")[0]!,
+        to: new Date(nowMs).toISOString().split("T")[0]!,
       },
       metrics: currentMetrics,
     });
 
     // 8. Update dream state
-    state.lastDreamAt = new Date().toISOString();
+    state.lastDreamAt = new Date(nowMs).toISOString();
     state.sessionsSinceDream = 0;
     state.totalDreams = nextDreamNumber;
     await saveDreamState(state);

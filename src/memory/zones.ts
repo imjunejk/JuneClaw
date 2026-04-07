@@ -13,10 +13,6 @@
  * Everything outside a MUTABLE ZONE is implicitly FIXED.
  */
 
-const MUTABLE_START = /^<!-- MUTABLE ZONE: (.+?) -->\s*$/m;
-const MUTABLE_END = /^<!-- END MUTABLE ZONE -->\s*$/m;
-const MUTABLE_BLOCK = /<!-- MUTABLE ZONE: (.+?) -->\n([\s\S]*?)<!-- END MUTABLE ZONE -->/g;
-
 export interface ZonedContent {
   /** Everything outside mutable zones (preserved byte-for-byte) */
   fixed: string;
@@ -26,25 +22,30 @@ export interface ZonedContent {
   raw: string;
 }
 
+/** Create a fresh MUTABLE_BLOCK regex (avoids /g lastIndex state leaks). */
+function mutableBlockRegex(): RegExp {
+  return /<!-- MUTABLE ZONE: (.+?) -->\r?\n([\s\S]*?)<!-- END MUTABLE ZONE -->/g;
+}
+
 /**
  * Parse a file into fixed and mutable zones.
  */
 export function parseZones(content: string): ZonedContent {
   const mutable = new Map<string, string>();
+  const re = mutableBlockRegex();
 
-  // Reset lastIndex since we reuse the regex
-  MUTABLE_BLOCK.lastIndex = 0;
   let match: RegExpExecArray | null;
-  while ((match = MUTABLE_BLOCK.exec(content)) !== null) {
+  while ((match = re.exec(content)) !== null) {
     const name = match[1]!.trim();
     const body = match[2]!;
     mutable.set(name, body);
   }
 
   // Fixed content = everything with mutable zones replaced by placeholders
-  let fixed = content;
-  MUTABLE_BLOCK.lastIndex = 0;
-  fixed = fixed.replace(MUTABLE_BLOCK, "<!-- MUTABLE ZONE: $1 -->\n<!-- END MUTABLE ZONE -->");
+  const fixed = content.replace(
+    mutableBlockRegex(),
+    "<!-- MUTABLE ZONE: $1 -->\n<!-- END MUTABLE ZONE -->",
+  );
 
   return { fixed, mutable, raw: content };
 }
@@ -59,12 +60,14 @@ export function replaceMutableZone(
   newContent: string,
 ): string | null {
   const pattern = new RegExp(
-    `(<!-- MUTABLE ZONE: ${escapeRegex(zoneName)} -->\\n)[\\s\\S]*?(<!-- END MUTABLE ZONE -->)`,
+    `(<!-- MUTABLE ZONE: ${escapeRegex(zoneName)} -->\\r?\\n)[\\s\\S]*?(<!-- END MUTABLE ZONE -->)`,
   );
 
   // Ensure newContent ends with a newline before the closing marker
   const normalized = newContent.endsWith("\n") ? newContent : newContent + "\n";
-  const result = content.replace(pattern, `$1${normalized}$2`);
+
+  // Use a replacer function to avoid $ special-character interpretation
+  const result = content.replace(pattern, (_, open: string, close: string) => `${open}${normalized}${close}`);
 
   // If nothing changed, the zone was not found
   if (result === content) return null;
@@ -76,7 +79,7 @@ export function replaceMutableZone(
  */
 export function extractMutableZone(content: string, zoneName: string): string | null {
   const pattern = new RegExp(
-    `<!-- MUTABLE ZONE: ${escapeRegex(zoneName)} -->\\n([\\s\\S]*?)<!-- END MUTABLE ZONE -->`,
+    `<!-- MUTABLE ZONE: ${escapeRegex(zoneName)} -->\\r?\\n([\\s\\S]*?)<!-- END MUTABLE ZONE -->`,
   );
   const match = pattern.exec(content);
   return match ? match[1]! : null;
