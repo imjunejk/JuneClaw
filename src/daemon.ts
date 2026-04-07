@@ -1067,16 +1067,17 @@ export async function startDaemon(): Promise<void> {
         }
 
         // Heavy lane: enqueue to durable queue (never drops)
-        // Priority prefix ensures coding (0) sorts before research (1) before general (2)
+        // Use msg.id as stable key to prevent duplicate enqueue from iMessage polling glitches
         const priority = taskPriority[taskType] ?? 2;
-        const queueId = await messageQueue.enqueue({
+        const queueId = `${priority}-${msg.id}`;
+        const queueResult = await messageQueue.enqueue({
           text: msg.text,
           taskType,
           phone: ch.phone,
           enqueuedAt: Date.now(),
-        }, `${priority}-${msg.id}-${Date.now()}`);
+        }, queueId);
         const pending = await messageQueue.pendingCount();
-        log(`[queue] enqueued ${queueId} (${taskType}), ${pending} pending`);
+        log(`[queue] enqueued ${queueResult} (${taskType}), ${pending} pending`);
       }
 
       // ── /btw drain: flush btw queue before dispatching new work ──

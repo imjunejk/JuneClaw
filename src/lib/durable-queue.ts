@@ -62,17 +62,29 @@ export class DurableQueue<T = unknown> {
     this.initialized = true;
   }
 
-  /** Enqueue a task. Always succeeds (writes to disk). */
+  /** Enqueue a task. Deduplicates by ID across pending/processing/completed. */
   async enqueue(data: T, id?: string): Promise<string> {
     await this.ensureDirs();
     const itemId = id ?? `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const filename = `${itemId}.json`;
+
+    // Dedup: skip if this ID already exists in any queue stage
+    for (const dir of [this.dirs.pending, this.dirs.processing, this.dirs.completed]) {
+      try {
+        await readFile(join(dir, filename), "utf-8");
+        return itemId; // already exists — skip silently
+      } catch {
+        // not found — continue checking
+      }
+    }
+
     const item: QueueItem<T> = {
       id: itemId,
       data,
       enqueuedAt: Date.now(),
       retryCount: 0,
     };
-    await atomicWriteJson(join(this.dirs.pending, `${itemId}.json`), item);
+    await atomicWriteJson(join(this.dirs.pending, filename), item);
     return itemId;
   }
 
