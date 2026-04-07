@@ -55,6 +55,7 @@ import { runFailureClassification, needsReclassification } from "./hooks/failure
 import { DurableQueue } from "./lib/durable-queue.js";
 import { WorkerPool } from "./lib/worker-pool.js";
 import { atomicWriteFile } from "./lib/atomic-file.js";
+import { tryAcquireDaemonLock, type DaemonLock } from "./lib/daemon-lock.js";
 import type { Channel } from "./gateway/types.js";
 
 function log(msg: string): void {
@@ -85,6 +86,7 @@ const state: DaemonState = {
 
 const quietMode = new Map<string, boolean>();
 let quietHoursOverrideUntil: number = 0;
+let daemonLock: DaemonLock | null = null;
 
 const processedIds = new Set<number>();
 const btwQueue: string[] = [];
@@ -375,32 +377,25 @@ async function killDuplicateProcesses(): Promise<void> {
 async function acquirePidLock(): Promise<void> {
   await mkdir(dirname(config.paths.pidFile), { recursive: true });
 
+  // Phase 0: Atomic lock — kernel-level exclusive guard, no race window
+  daemonLock = await tryAcquireDaemonLock();
+  if (!daemonLock) {
+    console.error("Another daemon instance is already running (lock held). Exiting.");
+    process.exit(1);
+  }
+
   // Phase 1: Kill any other node process running JuneClaw (catches tmux, old paths, etc.)
   await killDuplicateProcesses();
 
-  // Phase 2: PID file check (catches same-path duplicates)
-  try {
-    const existing = await readFile(config.paths.pidFile, "utf-8");
-    const pid = parseInt(existing.trim(), 10);
-    if (!isNaN(pid) && pid !== process.pid) {
-      try {
-        process.kill(pid, 0);
-        console.error(
-          `Another daemon instance is already running (PID ${pid}). Exiting.`,
-        );
-        process.exit(1);
-      } catch {
-        log(`Removing stale PID file (PID ${pid} not running)`);
-      }
-    }
-  } catch {
-    // No PID file — first launch
-  }
-
+  // Phase 2: Write PID file (still useful for watchdog scripts and `jc status`)
   await writeFile(config.paths.pidFile, String(process.pid), "utf-8");
 }
 
 async function releasePidLock(): Promise<void> {
+  if (daemonLock) {
+    await daemonLock.release();
+    daemonLock = null;
+  }
   try {
     await unlink(config.paths.pidFile);
   } catch {
@@ -820,6 +815,8 @@ async function runHeartbeat(
 
     state.lastHeartbeatAt = now.toISOString();
     await saveState();
+    // Update lock mtime so watchdog can verify liveness
+    await daemonLock?.touch();
 
     const response = result.response.trim();
     if (response.includes("HEARTBEAT_OK") || response.includes("NO_REPLY")) {

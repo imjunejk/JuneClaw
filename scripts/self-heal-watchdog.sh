@@ -256,6 +256,13 @@ if [[ "$needs_fix" -eq 0 ]]; then
   exit 0
 fi
 
+# ── Cleanup stale lock/pid before restart ────────────────────────────────
+# Remove lock file so the new daemon can acquire it cleanly.
+# Also kill orphan remote-control and progress-monitor processes.
+rm -f "$JUNECLAW_HOME/daemon.lock" "$PID_FILE"
+pkill -f "remote-control.*juneclaw" 2>/dev/null || true
+pkill -f "progress-monitor.sh" 2>/dev/null || true
+
 # ── Step 1: launchctl kickstart ──────────────────────────────────────────
 log "Issues: ${reasons[*]}. Running: launchctl kickstart"
 launchctl kickstart "gui/$(id -u)/$PLIST_NAME" >> "$LOG" 2>&1 || true
