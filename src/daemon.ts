@@ -18,7 +18,8 @@ import { addJob, stopAll as stopAllCron } from "./scheduler/cron.js";
 import { cascadeKill, cleanupStaleAgents, cleanupCompletedAgents } from "./agent/subagents.js";
 import { writeHandoff, writeSmartHandoff } from "./memory/handoff.js";
 import { emit } from "./hooks/events.js";
-import { logFromError } from "./hooks/incident.js";
+import { logFromError, inferCategory } from "./hooks/incident.js";
+import { appendSessionSignal } from "./hooks/signals.js";
 import { recordCost, isOverLimit, isNearLimit, getDailyCost } from "./hooks/cost-monitor.js";
 import {
   recordError,
@@ -42,9 +43,15 @@ import {
 import {
   incrementSessionCount,
   loadDreamState,
+  saveDreamState,
+  evaluatePendingExperiment,
   shouldDream,
   runDream,
 } from "./memory/dream.js";
+import { scoreExchange, scoreError, type ExchangeMetrics } from "./hooks/quality-scorer.js";
+import { appendScore, type LedgerEntry } from "./hooks/score-ledger.js";
+import { currentStrategyHash, incrementTunerExchangeCount, flushExchangeCount, runStrategyTuner } from "./memory/strategy-tuner.js";
+import { runFailureClassification, needsReclassification } from "./hooks/failure-classifier.js";
 import { DurableQueue } from "./lib/durable-queue.js";
 import { WorkerPool } from "./lib/worker-pool.js";
 import { atomicWriteFile } from "./lib/atomic-file.js";
@@ -81,6 +88,24 @@ let quietHoursOverrideUntil: number = 0;
 
 const processedIds = new Set<number>();
 const btwQueue: string[] = [];
+
+// ── Self-improvement: per-phone exchange tracking for quality scoring ──
+interface PendingExchange {
+  userMessage: string;
+  taskType: TaskType;
+  model: string;
+  tokens: number;
+  costUSD: number;
+  numTurns: number;
+  wasRetry: boolean;
+  timedOut: boolean;
+  forceRotated: boolean;
+  usagePercent: number;
+  strategyHash: string;
+  timestamp: string;
+}
+
+const pendingExchanges = new Map<string, PendingExchange>();
 let monitorProcess: ChildProcess | null = null;
 let monitorStopped = false;
 let remoteControlProcess: ChildProcess | null = null;
@@ -408,12 +433,58 @@ function isQuietHour(ch: ChannelConfig): boolean {
   return hour >= start && hour < end;
 }
 
+/**
+ * Score the previous exchange for a phone (if any) using the new user
+ * message as the follow-up signal, then log to the score ledger.
+ */
+async function scorePreviousExchange(phone: string, followUpMessage: string): Promise<void> {
+  const pending = pendingExchanges.get(phone);
+  if (!pending) return;
+  pendingExchanges.delete(phone);
+
+  try {
+    const metrics: ExchangeMetrics = {
+      wasRetry: pending.wasRetry,
+      timedOut: pending.timedOut,
+      forceRotated: pending.forceRotated,
+      usagePercent: pending.usagePercent,
+      costUSD: pending.costUSD,
+      numTurns: pending.numTurns,
+    };
+    const result = scoreExchange(followUpMessage, metrics);
+
+    const entry: LedgerEntry = {
+      timestamp: pending.timestamp,
+      taskType: pending.taskType,
+      model: pending.model,
+      score: result.score,
+      tokens: pending.tokens,
+      costUSD: pending.costUSD,
+      signals: result.signals,
+      strategyHash: pending.strategyHash,
+    };
+    await appendScore(entry);
+    incrementTunerExchangeCount();
+    await emit("quality:scored", { score: result.score, taskType: pending.taskType });
+    log(`[quality] scored ${pending.taskType}: ${result.score.toFixed(2)} [${result.signals.join(",")}]`);
+  } catch (err) {
+    // Best-effort — never block message processing
+    log(`[quality] scoring failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
 /** Handle a quick-lane message: non-blocking, no session, fire-and-forget. */
 async function processQuickMessage(
   channel: Channel,
   name: string,
+  phone: string,
   text: string,
 ): Promise<void> {
+  // Score previous heavy exchange using this quick message as follow-up
+  scorePreviousExchange(phone, text).catch((err) => {
+    log(`[quality] background scoring failed: ${err instanceof Error ? err.message : String(err)}`);
+  });
+
   log(`[quick] responding to: ${text.slice(0, 60)}...`);
   try {
     const response = await quickRespond(text);
@@ -436,6 +507,11 @@ async function processMessage(
   const phone = channelConfig.phone;
   const name = channelConfig.name;
   await emit("message:received", { from: name });
+
+  // Score previous exchange using this new message as the follow-up signal (fire-and-forget)
+  scorePreviousExchange(phone, text).catch((err) => {
+    log(`[quality] background scoring failed: ${err instanceof Error ? err.message : String(err)}`);
+  });
 
   if (quietMode.get(phone)) {
     log(`[quiet] skipping message from ${name}`);
@@ -464,7 +540,7 @@ async function processMessage(
 
   // Quick lane: fire-and-forget, no session needed
   if (taskType === "quick") {
-    await processQuickMessage(channel, name, text);
+    await processQuickMessage(channel, name, phone, text);
     return;
   }
 
@@ -506,6 +582,7 @@ async function processMessage(
 
   // Get session for this specific task type
   const sessionId = await getSessionId(phone, taskType);
+  const sessionStartMs = Date.now();
 
   try {
     const result = await runClaude({
@@ -517,6 +594,16 @@ async function processMessage(
     });
 
     recordSuccess(phone);
+
+    // Emit success signal for self-improvement metrics
+    appendSessionSignal({
+      timestamp: new Date().toISOString(),
+      taskType,
+      outcome: "success",
+      costUSD: result.usage?.costUSD ?? 0,
+      tokenCount: result.usage?.totalTokens ?? 0,
+      durationMs: Date.now() - sessionStartMs,
+    }).catch(() => {}); // best-effort
 
     if (result.usage) {
       recordUsage(phone, result.usage);
@@ -553,6 +640,23 @@ async function processMessage(
 
     // Record exchange for cross-session context bridge
     recordExchange(text, result.response, taskType);
+
+    // Store exchange for quality scoring on next user message
+    const stratHash = await currentStrategyHash(taskType);
+    pendingExchanges.set(phone, {
+      userMessage: text,
+      taskType,
+      model: model ?? config.claude.modelRouting[taskType],
+      tokens: result.usage?.totalTokens ?? 0,
+      costUSD: result.usage?.costUSD ?? 0,
+      numTurns: result.usage?.numTurns ?? 1,
+      wasRetry: false,
+      timedOut: false,
+      forceRotated: false,
+      usagePercent: result.usage?.usagePercent ?? 0,
+      strategyHash: stratHash,
+      timestamp: new Date().toISOString(),
+    });
 
     // Update shared context on significant task completions
     if (taskType === "coding" || taskType === "research") {
@@ -606,6 +710,9 @@ async function processMessage(
     // Phase 3: Force rotation (90%)
     const postReason = shouldRotate(phone);
     if (postReason) {
+      // Mark the pending exchange as force-rotated for quality scoring
+      const pending = pendingExchanges.get(phone);
+      if (pending) pending.forceRotated = true;
       log(`[context-rotation] triggered after processing: ${postReason}`);
       await executeRotation(phone, postReason, taskType);
       await emit("rotation:triggered", { reason: postReason });
@@ -620,6 +727,35 @@ async function processMessage(
     recordError(phone);
     await emit("message:error", { error: String(err) }).catch(() => {});
     await logFromError(err, `processMessage from ${name}`).catch(() => {});
+
+    // Emit failure signal for self-improvement metrics
+    const errMsg = err instanceof Error ? err.message : String(err);
+    appendSessionSignal({
+      timestamp: new Date().toISOString(),
+      taskType,
+      outcome: "failure",
+      category: inferCategory(errMsg),
+      costUSD: 0,
+      tokenCount: 0,
+      durationMs: Date.now() - sessionStartMs,
+    }).catch(() => {}); // best-effort
+
+    // Score this as a failed exchange for the quality ledger
+    try {
+      const errScore = scoreError(errMsg);
+      const stratHash = await currentStrategyHash(taskType);
+      await appendScore({
+        timestamp: new Date().toISOString(),
+        taskType,
+        model: model ?? config.claude.modelRouting[taskType],
+        score: errScore.score,
+        tokens: 0,
+        costUSD: 0,
+        signals: errScore.signals,
+        strategyHash: stratHash,
+      });
+      incrementTunerExchangeCount();
+    } catch { /* best-effort */ }
 
     if (
       err instanceof Error &&
@@ -641,6 +777,19 @@ async function runHeartbeat(
   const now = new Date();
 
   log("[heartbeat] running...");
+
+  // Clean up stale pending exchanges (older than 10 minutes)
+  const staleThreshold = Date.now() - 10 * 60_000;
+  for (const [phone, pending] of pendingExchanges) {
+    if (new Date(pending.timestamp).getTime() < staleThreshold) {
+      pendingExchanges.delete(phone);
+    }
+  }
+
+  // Flush in-memory exchange counter to disk
+  await flushExchangeCount().catch((err) => {
+    log(`[heartbeat] exchange count flush failed: ${err instanceof Error ? err.message : String(err)}`);
+  });
 
   try {
     // Orphan detection + archive before heartbeat
@@ -687,15 +836,36 @@ async function runHeartbeat(
     await emit("heartbeat:failed", { error: String(err) });
   }
 
-  // autoDream: check if memory consolidation should run
+  // Hill-climbing + autoDream: single dreamState load for both checks
   try {
     const dreamState = await loadDreamState();
+
+    // Evaluate pending experiment independently of dream gate.
+    // This ensures evaluations happen even when the daemon has low activity
+    // (fewer than 5 sessions / 24h) that wouldn't trigger shouldDream().
+    if (dreamState.pendingEvaluation) {
+      const evalResult = await evaluatePendingExperiment(dreamState);
+      if (evalResult !== null) {
+        await saveDreamState(dreamState);
+        log(`[dream] hill-climbing evaluation: ${evalResult ? "KEEP" : "REVERT"}`);
+      }
+    }
+
+    // autoDream: check if memory consolidation should run
     if (shouldDream(dreamState)) {
       log("[dream] trigger conditions met, starting autoDream...");
       await runDream();
+
+      // Run strategy tuner after dream consolidation
+      log("[tuner] running strategy tuner after dream...");
+      try {
+        await runStrategyTuner();
+      } catch (tunerErr) {
+        logError("[tuner] strategy tuner failed", tunerErr);
+      }
     }
   } catch (err) {
-    logError("[dream] autoDream failed", err);
+    logError("[dream] autoDream/hill-climbing failed", err);
   }
 }
 
@@ -736,6 +906,26 @@ function initCronScheduler(channel: Channel, channelConfig: ChannelConfig): void
     }
   });
 
+  addJob("failureClassification", config.cron.schedules.failureClassification!, async () => {
+    log("[cron] running failure classification...");
+    await emit("cron:started", { job: "failureClassification" });
+    try {
+      const needsUpdate = await needsReclassification();
+      if (needsUpdate) {
+        const clusters = await runFailureClassification();
+        log(`[cron] failure classification completed: ${clusters.length} categories`);
+        await emit("failures:classified", { categories: clusters.length });
+      } else {
+        log("[cron] failure classification skipped — no new incidents");
+      }
+      await emit("cron:completed", { job: "failureClassification" });
+    } catch (err) {
+      logError("[cron] failure classification failed", err);
+      await logFromError(err, "cron:failureClassification");
+      await emit("cron:failed", { job: "failureClassification", error: String(err) });
+    }
+  });
+
   log("[cron] scheduler initialized");
 }
 
@@ -747,6 +937,7 @@ async function ensureWorkspaceDirs(): Promise<void> {
   await mkdir(join(ws, "memory", "lessons"), { recursive: true });
   await mkdir(join(ws, "memory", "topics"), { recursive: true });
   await mkdir(join(ws, "strategies"), { recursive: true });
+  await mkdir(join(ws, "memory", "strategy-versions"), { recursive: true });
   await mkdir(join(ws, "tools"), { recursive: true });
   await mkdir(join(ws, "skills"), { recursive: true });
 }
@@ -869,7 +1060,7 @@ export async function startDaemon(): Promise<void> {
 
         // Quick lane: process immediately even if heavy work is ongoing
         if (taskType === "quick") {
-          processQuickMessage(channel, ch.name, msg.text).catch((err) => {
+          processQuickMessage(channel, ch.name, ch.phone, msg.text).catch((err) => {
             logError("[quick] fire-and-forget failed", err);
           });
           continue;

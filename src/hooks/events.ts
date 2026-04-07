@@ -13,7 +13,12 @@ export type DaemonEvent =
   | "cron:completed"
   | "cron:failed"
   | "rotation:triggered"
-  | "agent:orphan_detected";
+  | "agent:orphan_detected"
+  | "quality:scored"
+  | "tuner:keep"
+  | "tuner:discard"
+  | "tuner:tuned"
+  | "failures:classified";
 
 type EventHandler = (event: DaemonEvent, data?: Record<string, unknown>) => void | Promise<void>;
 

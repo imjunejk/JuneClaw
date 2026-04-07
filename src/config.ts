@@ -55,6 +55,17 @@ export const config = {
     minSessionsSinceLast: 5,
     model: "claude-sonnet-4-6",
     timeoutMs: 120_000,
+    hillClimbing: {
+      enabled: true,
+      /** Minimum sessions in the measurement window before evaluating */
+      minSessionsForEval: 5,
+      /** Days to wait after a dream before evaluating its impact */
+      evaluationWindowDays: 2,
+      /** Revert if success rate drops more than this (0.05 = 5 percentage points) */
+      successRateRevertThreshold: 0.05,
+      /** Revert if avg cost increases more than this (0.20 = 20%) */
+      costIncreaseRevertThreshold: 0.20,
+    },
   },
   poll: {
     intervalMs: 2000,
@@ -90,6 +101,7 @@ export const config = {
     pidFile: join(home, ".juneclaw", "daemon.pid"),
     watchdogState: join(home, ".juneclaw", "watchdog-state.txt"),
     dreamState: join(home, ".juneclaw", "dream-state.json"),
+    tunerState: join(home, ".juneclaw", "tuner-state.json"),
   },
   subAgents: {
     maxConcurrent: 5,
@@ -139,7 +151,16 @@ export const config = {
       heartbeat: "*/10 * * * *",
       weeklyCompression: "0 1 * * 1",
       monthlyCompression: "0 2 1 * *",
+      failureClassification: "0 3 * * *", // daily at 3am
     } as Record<string, string>,
+  },
+  strategyTuner: {
+    /** Minimum exchanges under a new strategy before evaluating keep/discard. */
+    minEvalExchanges: 10,
+    /** Minimum score delta to consider a strategy "improved". */
+    scoreImprovementThreshold: 0.02,
+    /** Don't tune task types with avg score above this. */
+    tuneScoreCeiling: 0.75,
   },
 };
 
