@@ -340,7 +340,7 @@ async function killDuplicateProcesses(): Promise<void> {
   }
 
   try {
-    const { stdout } = await execFileAsync("pgrep", ["-f", "JuneClaw/dist/index"]);
+    const { stdout } = await execFileAsync("pgrep", ["-f", "dist/index\\.js"]);
     const pids = stdout.trim().split("\n").map(Number).filter((p) => p !== process.pid);
     if (pids.length === 0) return;
 
