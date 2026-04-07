@@ -1,6 +1,8 @@
 import { readFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { config, type TaskType } from "../config.js";
 import { getSessionId, clearSessionId, getSessionEntries } from "../agent/session.js";
 import { setForceTaskType } from "../agent/classifier.js";
@@ -10,6 +12,10 @@ import { listAgentStatus, cascadeKill } from "../agent/subagents.js";
 import { writeHandoff } from "../memory/handoff.js";
 
 const execFileAsync = promisify(execFile);
+
+const ALGO_DIR = join(homedir(), "gwangsu-algo");
+const TRADE_EXECUTOR = join(ALGO_DIR, "trade_executor.py");
+const ALGO_PYTHON = join(ALGO_DIR, ".venv313", "bin", "python");
 
 export interface CommandResult {
   handled: boolean;
@@ -63,6 +69,12 @@ export async function handleCommand(
 
     case "/bypass":
       return { handled: true, response: await bypassCommand() };
+
+    case "/trade":
+      return { handled: true, response: await tradeCommand(args) };
+
+    case "/execute":
+      return { handled: true, response: await executeCommand(args) };
 
     default:
       return { handled: false };
@@ -238,4 +250,111 @@ async function agentsCommand(args: string[]): Promise<string> {
   }
 
   return "Usage: /agents [list|status|kill <id>]";
+}
+
+// ── Trade Execution ──────────────────────────────────────
+
+async function runTradeExecutor(...cmdArgs: string[]): Promise<{ ok: boolean; [k: string]: unknown }> {
+  try {
+    const { stdout } = await execFileAsync(ALGO_PYTHON, [TRADE_EXECUTOR, ...cmdArgs], {
+      timeout: 15_000,
+      env: { ...process.env, PYTHONPATH: ALGO_DIR },
+    });
+    return JSON.parse(stdout.trim());
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, error: msg };
+  }
+}
+
+async function tradeCommand(args: string[]): Promise<string> {
+  // /trade XLE sell 10%
+  // /trade XLE sell all
+  // /trade IWM buy $500
+  if (args.length < 3) {
+    return [
+      "사용법:",
+      "  /trade XLE sell 10%     — XLE 10% 매도",
+      "  /trade XLE sell all     — XLE 전량 매도",
+      "  /trade IWM buy $500     — IWM $500 매수",
+    ].join("\n");
+  }
+
+  const symbol = args[0].toUpperCase();
+  const side = args[1];
+  const amountStr = args[2];
+
+  if (side !== "buy" && side !== "sell") {
+    return `❌ side는 buy 또는 sell만 가능 (입력: ${side})`;
+  }
+
+  const cmdArgs = ["trade", "--symbol", symbol, "--side", side];
+
+  if (side === "sell") {
+    if (amountStr === "all" || amountStr === "close") {
+      cmdArgs.push("--close");
+    } else if (amountStr.endsWith("%")) {
+      const pct = parseFloat(amountStr.replace("%", ""));
+      if (isNaN(pct) || pct <= 0 || pct > 100) {
+        return `❌ 퍼센트 범위: 1-100 (입력: ${amountStr})`;
+      }
+      cmdArgs.push("--percent", String(pct));
+    } else {
+      return `❌ sell에는 퍼센트(10%) 또는 all 필요 (입력: ${amountStr})`;
+    }
+  } else {
+    // buy
+    const notional = parseFloat(amountStr.replace("$", ""));
+    if (isNaN(notional) || notional <= 0) {
+      return `❌ 매수 금액은 양수 (입력: ${amountStr})`;
+    }
+    cmdArgs.push("--notional", String(notional));
+  }
+
+  const result = await runTradeExecutor(...cmdArgs);
+
+  if (result.ok) {
+    return `✅ ${result.action}`;
+  }
+  return `❌ 주문 실패: ${result.error}`;
+}
+
+async function executeCommand(args: string[]): Promise<string> {
+  // /execute 1,2  or  /execute 1
+  if (args.length === 0) {
+    // 보류 액션 목록 표시
+    const pending = await runTradeExecutor("actions", "get");
+    if (!pending.ok) return `❌ ${pending.error}`;
+
+    const actions = (pending.actions ?? []) as Array<{ id: number; desc: string }>;
+    if (actions.length === 0) {
+      return pending.expired
+        ? "⏰ 실행 가능 액션 만료 (24시간 경과)"
+        : "📭 실행 대기 중인 액션 없음";
+    }
+
+    const lines = ["🎯 실행 가능 액션:"];
+    for (const a of actions) {
+      lines.push(`[${a.id}] ${a.desc}`);
+    }
+    lines.push('\n"/execute 1,2" 로 실행');
+    return lines.join("\n");
+  }
+
+  // 실행
+  const idsStr = args.join(",");
+  const result = await runTradeExecutor("actions", "execute", idsStr);
+
+  if (!result.ok) return `❌ ${result.error}`;
+
+  const results = (result.results ?? []) as Array<{ id: number; ok: boolean; action?: string; error?: string }>;
+  const lines: string[] = [];
+  for (const r of results) {
+    if (r.ok) {
+      lines.push(`✅ [${r.id}] ${r.action}`);
+    } else {
+      lines.push(`❌ [${r.id}] ${r.error}`);
+    }
+  }
+  return lines.join("\n");
 }
