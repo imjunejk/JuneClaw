@@ -8,7 +8,7 @@ import { config, type ChannelConfig, type TaskType } from "./config.js";
 import { createIMessageChannel } from "./gateway/imessage.js";
 import { handleCommand } from "./gateway/commands.js";
 import { runClaude } from "./agent/runner.js";
-import { getSessionId, setSessionId, clearSessionId, cleanupExpiredSessions } from "./agent/session.js";
+import { getSessionId, setSessionId, clearSessionId, cleanupExpiredSessions, getSessionEntries } from "./agent/session.js";
 import { classifyTask, getModelForTask } from "./agent/classifier.js";
 import { quickRespond } from "./agent/quick-responder.js";
 import { recordExchange, getRecentContext, appendSharedContext, getSharedContext, loadRecentExchanges } from "./agent/context-bridge.js";
@@ -250,6 +250,26 @@ function stopProgressMonitor(): void {
   }
 }
 
+const RC_TMUX_SESSION = "juneclaw-rc";
+
+async function hasTmux(): Promise<boolean> {
+  try {
+    await execFileAsync("tmux", ["-V"]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function isTmuxSessionAlive(): Promise<boolean> {
+  try {
+    await execFileAsync("tmux", ["has-session", "-t", RC_TMUX_SESSION]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function startRemoteControl(): void {
   if (!config.remoteControl.enabled) {
     log("[remote-control] disabled via config");
@@ -257,17 +277,98 @@ function startRemoteControl(): void {
   }
 
   remoteControlStopped = false;
-  // dist/daemon.js → go up one level to project root (/Users/jp/JuneClaw/)
   const rcCwd = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
+
+  // Try to launch inside a tmux session so the user can attach and interact.
+  // Falls back to headless spawn if tmux is unavailable.
+  void (async () => {
+    // W2 fix: check stopped flag after async work to prevent zombie spawns
+    const tmuxAvailable = await hasTmux();
+    if (remoteControlStopped) return;
+
+    if (tmuxAvailable) {
+      // Kill stale tmux session if it exists
+      if (await isTmuxSessionAlive()) {
+        try { await execFileAsync("tmux", ["kill-session", "-t", RC_TMUX_SESSION]); } catch { /* ok */ }
+      }
+      if (remoteControlStopped) return;
+
+      // W1 fix: pass args as separate positional args to avoid shell-parsing issues
+      remoteControlProcess = spawn("tmux", [
+        "new-session", "-d", "-s", RC_TMUX_SESSION,
+        "-c", rcCwd,
+        config.claude.bin, "remote-control",
+        "--permission-mode", config.claude.permissionMode,
+        "--name", config.remoteControl.name,
+        "--spawn", "same-dir",
+        "--capacity", "8",
+        "--no-create-session-in-dir",
+      ], {
+        stdio: ["ignore", "pipe", "pipe"],
+        detached: false,
+      });
+
+      // tmux new-session exits immediately after creating the session,
+      // so we monitor the tmux session itself for liveness.
+      remoteControlProcess.on("exit", () => {
+        remoteControlProcess = null;
+        if (!remoteControlStopped) {
+          startTmuxWatcher();
+        }
+      });
+
+      remoteControlProcess.on("error", (err) => {
+        log(`[remote-control] tmux spawn error: ${err.message}`);
+        remoteControlProcess = null;
+      });
+
+      log(`[remote-control] started in tmux session '${RC_TMUX_SESSION}' — attach with: tmux attach -t ${RC_TMUX_SESSION}`);
+    } else {
+      // Fallback: headless spawn (original behavior)
+      startRemoteControlHeadless(rcCwd);
+    }
+  })();
+}
+
+let tmuxWatcherTimer: ReturnType<typeof setInterval> | null = null;
+
+function startTmuxWatcher(): void {
+  if (tmuxWatcherTimer) return;
+  tmuxWatcherTimer = setInterval(async () => {
+    if (remoteControlStopped) {
+      stopTmuxWatcher();
+      return;
+    }
+    const alive = await isTmuxSessionAlive();
+    if (!alive) {
+      log("[remote-control] tmux session died, respawning...");
+      stopTmuxWatcher();
+      setTimeout(() => {
+        if (!remoteControlStopped) startRemoteControl();
+      }, config.remoteControl.respawnDelayMs);
+    }
+  }, 10_000);
+}
+
+function stopTmuxWatcher(): void {
+  if (tmuxWatcherTimer) {
+    clearInterval(tmuxWatcherTimer);
+    tmuxWatcherTimer = null;
+  }
+}
+
+function startRemoteControlHeadless(rcCwd: string): void {
   remoteControlProcess = spawn(config.claude.bin, [
     "remote-control",
     "--permission-mode", config.claude.permissionMode,
     "--name", config.remoteControl.name,
+    "--spawn", "same-dir",
+    "--capacity", "8",
+    "--no-create-session-in-dir",
   ], {
     stdio: ["ignore", "pipe", "pipe"],
     detached: false,
     cwd: rcCwd,
-    env: { ...process.env },
   });
 
   remoteControlProcess.stdout?.on("data", (chunk: Buffer) => {
@@ -306,11 +407,13 @@ function startRemoteControl(): void {
     }
   });
 
-  log(`[remote-control] started (PID ${remoteControlProcess.pid})`);
+  log(`[remote-control] started headless (PID ${remoteControlProcess.pid})`);
 }
 
 function stopRemoteControl(): void {
+  if (!config.remoteControl.enabled) return;
   remoteControlStopped = true;
+  stopTmuxWatcher();
   if (remoteControlProcess) {
     const proc = remoteControlProcess;
     remoteControlProcess = null;
@@ -318,14 +421,38 @@ function stopRemoteControl(): void {
     setTimeout(() => {
       try { proc.kill("SIGKILL"); } catch { /* already dead */ }
     }, 5_000);
-    log("[remote-control] stopped");
   }
+  // Kill tmux session if it exists
+  execFileAsync("tmux", ["kill-session", "-t", RC_TMUX_SESSION]).catch(() => { /* ok */ });
+  log("[remote-control] stopped");
 }
 
 async function killDuplicateProcesses(): Promise<void> {
   // Kill orphan child processes from previous daemon instances.
   // Must run BEFORE startRemoteControl()/startProgressMonitor() so we
   // never accidentally kill our own children.
+  // Kill stale tmux session from a previous daemon instance
+  try { await execFileAsync("tmux", ["kill-session", "-t", RC_TMUX_SESSION]); } catch { /* ok */ }
+
+  // Clean up stale Claude session files (zombie prevention)
+  try {
+    const { readdir } = await import("node:fs/promises");
+    const sessionsDir = join(process.env.HOME ?? "", ".claude", "sessions");
+    const files = await readdir(sessionsDir).catch(() => [] as string[]);
+    for (const f of files) {
+      if (!f.endsWith(".json")) continue;
+      const pid = parseInt(f.replace(".json", ""), 10);
+      if (isNaN(pid)) continue;
+      try {
+        process.kill(pid, 0); // check if alive
+      } catch {
+        // PID is dead — remove stale session file
+        try { await unlink(join(sessionsDir, f)); } catch { /* ok */ }
+        log(`[startup] cleaned stale session file: ${f}`);
+      }
+    }
+  } catch { /* sessions dir may not exist */ }
+
   for (const pattern of [
     "remote-control.*--name.*juneclaw",
     "progress-monitor\\.sh",
@@ -965,6 +1092,62 @@ async function ensureWorkspaceDirs(): Promise<void> {
   await mkdir(join(ws, "skills"), { recursive: true });
 }
 
+async function buildStartupReport(): Promise<{ log: string; message: string }> {
+  const lines: string[] = ["[startup] === Active Sessions ==="];
+  const msgLines: string[] = ["JuneClaw restarted"];
+
+  // 1. Claude CLI sessions from sessions.json
+  const ch = config.channels.june;
+  const entries = await getSessionEntries(ch.phone);
+  const taskTypes = Object.keys(entries) as TaskType[];
+  if (taskTypes.length > 0) {
+    msgLines.push("");
+    msgLines.push("세션:");
+    for (const tt of taskTypes) {
+      const e = entries[tt]!;
+      const idle = Math.round((Date.now() - new Date(e.lastActiveAt).getTime()) / 60_000);
+      const sid = e.sessionId.slice(0, 8);
+      lines.push(`  ${ch.phone}/${tt} — session ${sid}… (model: ${e.model}, ${e.messageCount} msgs, idle ${idle}m)`);
+      msgLines.push(`  ${tt}: ${e.model}, ${e.messageCount}건, ${idle}분 전`);
+    }
+  } else {
+    lines.push("  (no active sessions)");
+  }
+
+  // 2. Remote control sessions via `claude rc list` (best-effort)
+  try {
+    const { stdout } = await execFileAsync(config.claude.bin, ["rc", "list"], { timeout: 5_000 });
+    const rcOutput = stdout.trim();
+    if (rcOutput) {
+      lines.push("[startup] === Remote Control Sessions ===");
+      lines.push(`  ${rcOutput.replace(/\n/g, "\n  ")}`);
+      // Count lines that look like sessions (non-empty, non-header)
+      const rcLines = rcOutput.split("\n").filter(l => l.trim() && !l.startsWith("─"));
+      if (rcLines.length > 0) {
+        msgLines.push("");
+        msgLines.push(`리모트: ${rcLines.length}개 세션`);
+      }
+    }
+  } catch {
+    // claude rc list may not exist or fail — skip silently
+    lines.push("[startup] === Remote Control Sessions ===");
+    lines.push("  (unable to query — rc list unavailable)");
+  }
+
+  // 3. Running claude processes (best-effort)
+  try {
+    const { stdout } = await execFileAsync("pgrep", ["-f", "claude.*--print|claude.*remote-control"]);
+    const pids = stdout.trim().split("\n").filter(Boolean);
+    if (pids.length > 0) {
+      lines.push(`[startup] Running claude processes: ${pids.length} (PIDs: ${pids.join(", ")})`);
+    }
+  } catch {
+    // no matches — normal
+  }
+
+  return { log: lines.join("\n"), message: msgLines.join("\n") };
+}
+
 export async function startDaemon(): Promise<void> {
   await acquirePidLock();
   await ensureWorkspaceDirs();
@@ -1007,8 +1190,12 @@ export async function startDaemon(): Promise<void> {
   // Start Claude remote-control so June can connect via claude.ai/code
   startRemoteControl();
 
-  // Notify June that daemon has started
-  await channel.sendMessage("JuneClaw restarted").catch((err) => {
+  // Log active sessions on startup
+  const startupReport = await buildStartupReport();
+  log(startupReport.log);
+
+  // Notify June that daemon has started with session summary
+  await channel.sendMessage(startupReport.message).catch((err) => {
     log(`[startup] failed to send restart notification: ${err instanceof Error ? err.message : String(err)}`);
   });
 
