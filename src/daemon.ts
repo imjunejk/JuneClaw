@@ -1,4 +1,4 @@
-import { writeFile, readFile, unlink, mkdir, rename } from "node:fs/promises";
+import { writeFile, readFile, readdir, unlink, mkdir, rename } from "node:fs/promises";
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { promisify } from "node:util";
 import { dirname, join } from "node:path";
@@ -304,7 +304,7 @@ function startRemoteControl(): void {
         "--capacity", "8",
         "--no-create-session-in-dir",
       ], {
-        stdio: ["ignore", "pipe", "pipe"],
+        stdio: "ignore",
         detached: false,
       });
 
@@ -331,6 +331,7 @@ function startRemoteControl(): void {
 }
 
 let tmuxWatcherTimer: ReturnType<typeof setInterval> | null = null;
+let rcRespawnTimer: ReturnType<typeof setTimeout> | null = null;
 
 function startTmuxWatcher(): void {
   if (tmuxWatcherTimer) return;
@@ -343,7 +344,8 @@ function startTmuxWatcher(): void {
     if (!alive) {
       log("[remote-control] tmux session died, respawning...");
       stopTmuxWatcher();
-      setTimeout(() => {
+      rcRespawnTimer = setTimeout(() => {
+        rcRespawnTimer = null;
         if (!remoteControlStopped) startRemoteControl();
       }, config.remoteControl.respawnDelayMs);
     }
@@ -354,6 +356,10 @@ function stopTmuxWatcher(): void {
   if (tmuxWatcherTimer) {
     clearInterval(tmuxWatcherTimer);
     tmuxWatcherTimer = null;
+  }
+  if (rcRespawnTimer) {
+    clearTimeout(rcRespawnTimer);
+    rcRespawnTimer = null;
   }
 }
 
@@ -411,7 +417,6 @@ function startRemoteControlHeadless(rcCwd: string): void {
 }
 
 function stopRemoteControl(): void {
-  if (!config.remoteControl.enabled) return;
   remoteControlStopped = true;
   stopTmuxWatcher();
   if (remoteControlProcess) {
@@ -436,7 +441,6 @@ async function killDuplicateProcesses(): Promise<void> {
 
   // Clean up stale Claude session files (zombie prevention)
   try {
-    const { readdir } = await import("node:fs/promises");
     const sessionsDir = join(process.env.HOME ?? "", ".claude", "sessions");
     const files = await readdir(sessionsDir).catch(() => [] as string[]);
     for (const f of files) {
@@ -444,11 +448,13 @@ async function killDuplicateProcesses(): Promise<void> {
       const pid = parseInt(f.replace(".json", ""), 10);
       if (isNaN(pid)) continue;
       try {
-        process.kill(pid, 0); // check if alive
-      } catch {
-        // PID is dead — remove stale session file
-        try { await unlink(join(sessionsDir, f)); } catch { /* ok */ }
-        log(`[startup] cleaned stale session file: ${f}`);
+        process.kill(pid, 0); // check if alive — throws ESRCH if dead, EPERM if alive but different user
+      } catch (err: unknown) {
+        // Only delete if process is truly dead (ESRCH), not just inaccessible (EPERM)
+        if ((err as NodeJS.ErrnoException)?.code === "ESRCH") {
+          try { await unlink(join(sessionsDir, f)); } catch { /* ok */ }
+          log(`[startup] cleaned stale session file: ${f}`);
+        }
       }
     }
   } catch { /* sessions dir may not exist */ }
@@ -1114,24 +1120,22 @@ async function buildStartupReport(): Promise<{ log: string; message: string }> {
     lines.push("  (no active sessions)");
   }
 
-  // 2. Remote control sessions via `claude rc list` (best-effort)
+  // 2. Remote control tmux session (best-effort)
   try {
-    const { stdout } = await execFileAsync(config.claude.bin, ["rc", "list"], { timeout: 5_000 });
+    const { stdout } = await execFileAsync("tmux", ["list-sessions", "-F", "#{session_name}: #{session_windows} windows (created #{session_created_string})"], { timeout: 5_000 });
     const rcOutput = stdout.trim();
     if (rcOutput) {
-      lines.push("[startup] === Remote Control Sessions ===");
-      lines.push(`  ${rcOutput.replace(/\n/g, "\n  ")}`);
-      // Count lines that look like sessions (non-empty, non-header)
-      const rcLines = rcOutput.split("\n").filter(l => l.trim() && !l.startsWith("─"));
-      if (rcLines.length > 0) {
+      lines.push("[startup] === tmux Sessions ===");
+      const rcLines = rcOutput.split("\n").filter(Boolean);
+      for (const l of rcLines) lines.push(`  ${l}`);
+      const rcCount = rcLines.filter(l => l.startsWith(RC_TMUX_SESSION)).length;
+      if (rcCount > 0) {
         msgLines.push("");
-        msgLines.push(`리모트: ${rcLines.length}개 세션`);
+        msgLines.push(`리모트: tmux ${RC_TMUX_SESSION} 활성`);
       }
     }
   } catch {
-    // claude rc list may not exist or fail — skip silently
-    lines.push("[startup] === Remote Control Sessions ===");
-    lines.push("  (unable to query — rc list unavailable)");
+    // tmux not running or no sessions — normal
   }
 
   // 3. Running claude processes (best-effort)
