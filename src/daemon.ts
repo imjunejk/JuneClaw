@@ -1,4 +1,4 @@
-import { writeFile, readFile, unlink, mkdir, rename } from "node:fs/promises";
+import { writeFile, readFile, readdir, unlink, mkdir, rename } from "node:fs/promises";
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { promisify } from "node:util";
 import { dirname, join } from "node:path";
@@ -8,7 +8,7 @@ import { config, type ChannelConfig, type TaskType } from "./config.js";
 import { createIMessageChannel } from "./gateway/imessage.js";
 import { handleCommand } from "./gateway/commands.js";
 import { runClaude } from "./agent/runner.js";
-import { getSessionId, setSessionId, clearSessionId, cleanupExpiredSessions } from "./agent/session.js";
+import { getSessionId, setSessionId, clearSessionId, cleanupExpiredSessions, getSessionEntries } from "./agent/session.js";
 import { classifyTask, getModelForTask } from "./agent/classifier.js";
 import { quickRespond } from "./agent/quick-responder.js";
 import { recordExchange, getRecentContext, appendSharedContext, getSharedContext, loadRecentExchanges } from "./agent/context-bridge.js";
@@ -250,6 +250,26 @@ function stopProgressMonitor(): void {
   }
 }
 
+const RC_TMUX_SESSION = "juneclaw-rc";
+
+async function hasTmux(): Promise<boolean> {
+  try {
+    await execFileAsync("tmux", ["-V"]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function isTmuxSessionAlive(): Promise<boolean> {
+  try {
+    await execFileAsync("tmux", ["has-session", "-t", RC_TMUX_SESSION]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function startRemoteControl(): void {
   if (!config.remoteControl.enabled) {
     log("[remote-control] disabled via config");
@@ -257,17 +277,99 @@ function startRemoteControl(): void {
   }
 
   remoteControlStopped = false;
-  // dist/daemon.js → go up one level to project root (/Users/jp/JuneClaw/)
   const rcCwd = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
+
+  // Try to launch inside a tmux session so the user can attach and interact.
+  // Falls back to headless spawn if tmux is unavailable.
+  void (async () => {
+    // W2 fix: check stopped flag after async work to prevent zombie spawns
+    const tmuxAvailable = await hasTmux();
+    if (remoteControlStopped) return;
+
+    if (tmuxAvailable) {
+      // Stale sessions already cleaned by killDuplicateProcesses().
+      // W1 fix: pass args as separate positional args to avoid shell-parsing issues
+      remoteControlProcess = spawn("tmux", [
+        "new-session", "-d", "-s", RC_TMUX_SESSION,
+        "-c", rcCwd,
+        config.claude.bin, "remote-control",
+        "--permission-mode", config.claude.permissionMode,
+        "--name", config.remoteControl.name,
+        "--spawn", "same-dir",
+        "--capacity", "8",
+        "--no-create-session-in-dir",
+      ], {
+        stdio: "ignore",
+        detached: false,
+      });
+
+      // tmux new-session exits immediately after creating the session,
+      // so we monitor the tmux session itself for liveness.
+      remoteControlProcess.on("exit", () => {
+        remoteControlProcess = null;
+        if (!remoteControlStopped) {
+          startTmuxWatcher();
+        }
+      });
+
+      remoteControlProcess.on("error", (err) => {
+        log(`[remote-control] tmux spawn error: ${err.message}`);
+        remoteControlProcess = null;
+      });
+
+      log(`[remote-control] started in tmux session '${RC_TMUX_SESSION}' — attach with: tmux attach -t ${RC_TMUX_SESSION}`);
+    } else {
+      // Fallback: headless spawn (original behavior)
+      startRemoteControlHeadless(rcCwd);
+    }
+  })();
+}
+
+let tmuxWatcherTimer: ReturnType<typeof setInterval> | null = null;
+let rcRespawnTimer: ReturnType<typeof setTimeout> | null = null;
+
+function startTmuxWatcher(): void {
+  if (tmuxWatcherTimer) return;
+  tmuxWatcherTimer = setInterval(async () => {
+    if (remoteControlStopped) {
+      stopTmuxWatcher();
+      return;
+    }
+    const alive = await isTmuxSessionAlive();
+    if (!alive) {
+      log("[remote-control] tmux session died, respawning...");
+      stopTmuxWatcher();
+      rcRespawnTimer = setTimeout(() => {
+        rcRespawnTimer = null;
+        if (!remoteControlStopped) startRemoteControl();
+      }, config.remoteControl.respawnDelayMs);
+    }
+  }, 10_000);
+}
+
+function stopTmuxWatcher(): void {
+  if (tmuxWatcherTimer) {
+    clearInterval(tmuxWatcherTimer);
+    tmuxWatcherTimer = null;
+  }
+  if (rcRespawnTimer) {
+    clearTimeout(rcRespawnTimer);
+    rcRespawnTimer = null;
+  }
+}
+
+function startRemoteControlHeadless(rcCwd: string): void {
   remoteControlProcess = spawn(config.claude.bin, [
     "remote-control",
     "--permission-mode", config.claude.permissionMode,
     "--name", config.remoteControl.name,
+    "--spawn", "same-dir",
+    "--capacity", "8",
+    "--no-create-session-in-dir",
   ], {
     stdio: ["ignore", "pipe", "pipe"],
     detached: false,
     cwd: rcCwd,
-    env: { ...process.env },
   });
 
   remoteControlProcess.stdout?.on("data", (chunk: Buffer) => {
@@ -280,37 +382,35 @@ function startRemoteControl(): void {
     if (line) log(`[remote-control:err] ${line}`);
   });
 
+  // error can fire before exit — use shared rcRespawnTimer to prevent double-respawn
+  const scheduleHeadlessRespawn = (reason: string) => {
+    remoteControlProcess = null;
+    if (remoteControlStopped || rcRespawnTimer) return;
+    rcRespawnTimer = setTimeout(() => {
+      rcRespawnTimer = null;
+      if (!remoteControlStopped) {
+        log(`[remote-control] respawning after ${reason}...`);
+        startRemoteControl();
+      }
+    }, config.remoteControl.respawnDelayMs);
+  };
+
   remoteControlProcess.on("error", (err) => {
     log(`[remote-control] spawn error: ${err.message}`);
-    remoteControlProcess = null;
-    if (!remoteControlStopped) {
-      setTimeout(() => {
-        if (!remoteControlStopped && remoteControlProcess === null) {
-          log("[remote-control] retrying after spawn error...");
-          startRemoteControl();
-        }
-      }, config.remoteControl.respawnDelayMs);
-    }
+    scheduleHeadlessRespawn("spawn error");
   });
 
   remoteControlProcess.on("exit", (code) => {
     log(`[remote-control] exited with code ${code}`);
-    remoteControlProcess = null;
-    if (!remoteControlStopped) {
-      setTimeout(() => {
-        if (!remoteControlStopped && remoteControlProcess === null) {
-          log("[remote-control] respawning after exit...");
-          startRemoteControl();
-        }
-      }, config.remoteControl.respawnDelayMs);
-    }
+    scheduleHeadlessRespawn("exit");
   });
 
-  log(`[remote-control] started (PID ${remoteControlProcess.pid})`);
+  log(`[remote-control] started headless (PID ${remoteControlProcess.pid})`);
 }
 
 function stopRemoteControl(): void {
   remoteControlStopped = true;
+  stopTmuxWatcher();
   if (remoteControlProcess) {
     const proc = remoteControlProcess;
     remoteControlProcess = null;
@@ -318,14 +418,39 @@ function stopRemoteControl(): void {
     setTimeout(() => {
       try { proc.kill("SIGKILL"); } catch { /* already dead */ }
     }, 5_000);
-    log("[remote-control] stopped");
   }
+  // Kill tmux session if it exists
+  execFileAsync("tmux", ["kill-session", "-t", RC_TMUX_SESSION]).catch(() => { /* ok */ });
+  log("[remote-control] stopped");
 }
 
 async function killDuplicateProcesses(): Promise<void> {
   // Kill orphan child processes from previous daemon instances.
   // Must run BEFORE startRemoteControl()/startProgressMonitor() so we
   // never accidentally kill our own children.
+  // Kill stale tmux session from a previous daemon instance
+  try { await execFileAsync("tmux", ["kill-session", "-t", RC_TMUX_SESSION]); } catch { /* ok */ }
+
+  // Clean up stale Claude session files (zombie prevention)
+  try {
+    const sessionsDir = join(process.env.HOME ?? "", ".claude", "sessions");
+    const files = await readdir(sessionsDir).catch(() => [] as string[]);
+    for (const f of files) {
+      if (!f.endsWith(".json")) continue;
+      const pid = parseInt(f.replace(".json", ""), 10);
+      if (isNaN(pid)) continue;
+      try {
+        process.kill(pid, 0); // check if alive — throws ESRCH if dead, EPERM if alive but different user
+      } catch (err: unknown) {
+        // Only delete if process is truly dead (ESRCH), not just inaccessible (EPERM)
+        if ((err as NodeJS.ErrnoException)?.code === "ESRCH") {
+          try { await unlink(join(sessionsDir, f)); } catch { /* ok */ }
+          log(`[startup] cleaned stale session file: ${f}`);
+        }
+      }
+    }
+  } catch { /* sessions dir may not exist */ }
+
   for (const pattern of [
     "remote-control.*--name.*juneclaw",
     "progress-monitor\\.sh",
@@ -965,6 +1090,65 @@ async function ensureWorkspaceDirs(): Promise<void> {
   await mkdir(join(ws, "skills"), { recursive: true });
 }
 
+async function buildStartupReport(): Promise<{ log: string; message: string }> {
+  const lines: string[] = ["[startup] === Active Sessions ==="];
+  const msgLines: string[] = ["JuneClaw restarted"];
+
+  // 1. Claude CLI sessions from sessions.json (all channels)
+  let hasAnySessions = false;
+  for (const ch of Object.values(config.channels)) {
+    const entries = await getSessionEntries(ch.phone);
+    const taskTypes = Object.keys(entries) as TaskType[];
+    if (taskTypes.length > 0) {
+      hasAnySessions = true;
+      msgLines.push("");
+      msgLines.push(`세션 (${ch.name}):`);
+      for (const tt of taskTypes) {
+        const e = entries[tt]!;
+        const idle = Math.round((Date.now() - new Date(e.lastActiveAt).getTime()) / 60_000);
+        const sid = e.sessionId.slice(0, 8);
+        lines.push(`  ${ch.phone}/${tt} — session ${sid}… (model: ${e.model}, ${e.messageCount} msgs, idle ${idle}m)`);
+        msgLines.push(`  ${tt}: ${e.model}, ${e.messageCount}건, ${idle}분 전`);
+      }
+    }
+  }
+  if (!hasAnySessions) {
+    lines.push("  (no active sessions)");
+  }
+
+  // 2. Remote control tmux session (best-effort)
+  try {
+    const { stdout } = await execFileAsync("tmux", ["list-sessions", "-F", "#{session_name}: #{session_windows} windows (created #{session_created_string})"], { timeout: 5_000 });
+    const rcOutput = stdout.trim();
+    if (rcOutput) {
+      lines.push("[startup] === tmux Sessions ===");
+      const rcLines = rcOutput.split("\n").filter(Boolean);
+      for (const l of rcLines) lines.push(`  ${l}`);
+      const rcCount = rcLines.filter(l => l.startsWith(RC_TMUX_SESSION)).length;
+      if (rcCount > 0) {
+        msgLines.push("");
+        msgLines.push(`리모트: tmux ${RC_TMUX_SESSION} 활성`);
+      }
+    }
+  } catch {
+    // tmux not running or no sessions — normal
+  }
+
+  // 3. Running claude processes (best-effort)
+  try {
+    const { stdout } = await execFileAsync("pgrep", ["-f", "claude.*--print|claude.*remote-control"]);
+    const myPid = String(process.pid);
+    const pids = stdout.trim().split("\n").filter(Boolean).filter(p => p !== myPid);
+    if (pids.length > 0) {
+      lines.push(`[startup] Running claude processes: ${pids.length} (PIDs: ${pids.join(", ")})`);
+    }
+  } catch {
+    // no matches — normal
+  }
+
+  return { log: lines.join("\n"), message: msgLines.join("\n") };
+}
+
 export async function startDaemon(): Promise<void> {
   await acquirePidLock();
   await ensureWorkspaceDirs();
@@ -1004,11 +1188,16 @@ export async function startDaemon(): Promise<void> {
   // Start external progress monitor (background shell script)
   startProgressMonitor();
 
+  // Build startup report BEFORE spawning remote-control so the tmux session
+  // check reflects pre-existing state, not our own in-flight spawn.
+  const startupReport = await buildStartupReport();
+  log(startupReport.log);
+
   // Start Claude remote-control so June can connect via claude.ai/code
   startRemoteControl();
 
-  // Notify June that daemon has started
-  await channel.sendMessage("JuneClaw restarted").catch((err) => {
+  // Notify June that daemon has started with session summary
+  await channel.sendMessage(startupReport.message).catch((err) => {
     log(`[startup] failed to send restart notification: ${err instanceof Error ? err.message : String(err)}`);
   });
 
