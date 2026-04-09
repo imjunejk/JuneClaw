@@ -15,9 +15,9 @@ export async function quickRespond(text: string): Promise<string> {
       // Previously 1 — but Sonnet's extended thinking pass counts as a turn,
       // so a response that required any reasoning step exited with
       // "Reached max turns (1)" (written to stdout, which is why prior error
-      // logs showed empty stderr). 3 leaves headroom without allowing
-      // multi-step tool chains (this call doesn't pass --allowedTools).
-      "--max-turns", "3",
+      // Extended thinking counts as a turn, so 3 was too tight.
+      // 5 gives enough headroom for reasoning + response.
+      "--max-turns", "5",
     ], {
       stdio: ["pipe", "pipe", "pipe"],
       env: { ...process.env, PATH: process.env.PATH ?? "" },
