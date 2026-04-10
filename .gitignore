@@ -5,3 +5,9 @@ dist/
 !src/**/*.d.ts
 .env
 .DS_Store
+
+# Memory (daily logs are generated, bootstrap is committed)
+memory/daily/
+memory/lessons/
+memory/dream-log.md
+memory/system-log.md

@@ -1,0 +1,4 @@
+- [육사 전략](project_yuksa_strategy.md) — AgiTQ 60% + SEPA 40%, 3구간 레짐, 크론 스케줄
+- [포트폴리오 현황](project_portfolio_status.md) — 보유 종목, 비율 (Auto Dream 매일 업데이트)
+- [거래 일지](project_trade_journal.md) — 매매 기록 (Auto Dream 매일 업데이트)
+- [시장 뉴스](project_market_news.md) — TQQQ SMA 추적 (Auto Dream 매일 업데이트)
