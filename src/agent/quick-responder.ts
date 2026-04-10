@@ -22,7 +22,7 @@ export async function quickRespond(text: string): Promise<string> {
       "--permission-mode", config.claude.permissionMode,
       // Extended thinking counts as a turn, so 3 was too tight.
       // 5 gives enough headroom for reasoning + response.
-      "--max-turns", "5",
+      "--max-turns", "10",
     ], {
       stdio: ["pipe", "pipe", "pipe"],
       env: { ...process.env, PATH: process.env.PATH ?? "" },
@@ -47,7 +47,7 @@ Message: ${text}`;
         try { child.kill("SIGKILL"); } catch { /* already dead */ }
       }, 5_000);
       reject(new Error("QUICK_TIMEOUT"));
-    }, 30_000);
+    }, 60_000);  // 60초 (시스템 컨텍스트 + HANDOFF 포함으로 30초는 부족)
 
     child.on("close", (code) => {
       clearTimeout(timer);
