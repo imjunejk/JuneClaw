@@ -47,7 +47,7 @@ Message: ${text}`;
         try { child.kill("SIGKILL"); } catch { /* already dead */ }
       }, 5_000);
       reject(new Error("QUICK_TIMEOUT"));
-    }, 60_000);  // 60초 (시스템 컨텍스트 + HANDOFF 포함으로 30초는 부족)
+    }, 180_000);  // 3분 (시스템 컨텍스트 + HANDOFF + 추론 여유)
 
     child.on("close", (code) => {
       clearTimeout(timer);
