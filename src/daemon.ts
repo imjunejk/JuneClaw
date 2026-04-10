@@ -277,7 +277,8 @@ function startRemoteControl(): void {
   }
 
   remoteControlStopped = false;
-  const rcCwd = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
+  // 홈 디렉토리에서 실행 — JuneClaw + gwangsu-algo 둘 다 접근 가능
+  const rcCwd = process.env.HOME ?? "/Users/jp";
 
   // Try to launch inside a tmux session so the user can attach and interact.
   // Falls back to headless spawn if tmux is unavailable.
