@@ -614,8 +614,22 @@ async function processQuickMessage(
     await appendDailyLog(name, text, response);
     recordExchange(text, response, "quick");
   } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
     logError("[quick] failed", err);
-    await channel.sendMessage("처리 중 오류가 발생했습니다.");
+
+    // Quick 실패 시 heavy session으로 에스컬레이션
+    if (errMsg.includes("QUICK_TIMEOUT") || errMsg.includes("max turns")) {
+      log(`[quick→heavy] escalating to general session: ${text.slice(0, 60)}...`);
+      await channel.sendMessage("잠시만요, 더 자세히 확인하고 답할게요.");
+      try {
+        await processMessage(channel, { phone, name } as ChannelConfig, text, "general");
+      } catch (heavyErr) {
+        logError("[quick→heavy] escalation also failed", heavyErr);
+        await channel.sendMessage("처리 중 오류가 발생했습니다.");
+      }
+    } else {
+      await channel.sendMessage("처리 중 오류가 발생했습니다.");
+    }
   }
 }
 
