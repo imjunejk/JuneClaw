@@ -1,8 +1,13 @@
+import { existsSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { config, type TaskType } from "../config.js";
 import { clearSessionId } from "./session.js";
 import { writeHandoff } from "../memory/handoff.js";
 import { appendDailyLog, appendSystemLog } from "../memory/writer.js";
 import type { UsageInfo } from "./runner.js";
+
+const PAUSE_FLAG = join(homedir(), ".juneclaw", "pause-rotation");
 
 export type RotationReason =
   | "consecutive_errors"
@@ -93,7 +98,13 @@ export function getUsageInfo(phone: string): {
   };
 }
 
+export function isRotationPaused(): boolean {
+  return existsSync(PAUSE_FLAG);
+}
+
 export function shouldRotate(phone: string): RotationReason | null {
+  if (isRotationPaused()) return null;
+
   const s = getState(phone);
   const {
     maxConsecutiveErrors,
@@ -119,6 +130,8 @@ export function shouldRotate(phone: string): RotationReason | null {
 }
 
 export function shouldWarnContext(phone: string): boolean {
+  if (isRotationPaused()) return false;
+
   const s = getState(phone);
   if (s.warningSent) return false;
   const { tokenWarningPercent, tokenHandoffPercent } = config.contextRotation;
@@ -131,6 +144,8 @@ export function shouldWarnContext(phone: string): boolean {
 }
 
 export function shouldHandoff(phone: string): boolean {
+  if (isRotationPaused()) return false;
+
   const s = getState(phone);
   if (s.handoffDone) return false;
   const { tokenHandoffPercent, tokenForceRotatePercent } = config.contextRotation;
