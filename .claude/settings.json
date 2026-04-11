@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(/Users/jp/**)",
+      "Edit(/Users/jp/**)",
+      "Write(/Users/jp/**)",
+      "Glob(path:/Users/jp/**)",
+      "Grep(path:/Users/jp/**)",
+      "Bash(gh pr:*)",
+      "Bash(gh repo:*)",
+      "Bash(git checkout:*)",
+      "Bash(git add:*)",
+      "Bash(git pull:*)",
+      "Bash(git push:*)",
+      "Bash(git commit:*)",
+      "Bash(git fetch:*)",
+      "Bash(git mv:*)",
+      "Bash(npm run:*)",
+      "Bash(npx tsc:*)"
+    ]
+  }
+}

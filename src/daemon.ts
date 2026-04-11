@@ -624,11 +624,12 @@ async function processQuickMessage(
       try {
         await processMessage(channel, { phone, name } as ChannelConfig, text, "general");
       } catch (heavyErr) {
+        const heavyErrMsg = heavyErr instanceof Error ? heavyErr.message : String(heavyErr);
         logError("[quick→heavy] escalation also failed", heavyErr);
-        await channel.sendMessage("처리 중 오류가 발생했습니다.");
+        await channel.sendMessage(`처리 중 오류: ${heavyErrMsg.slice(0, 200)}`);
       }
     } else {
-      await channel.sendMessage("처리 중 오류가 발생했습니다.");
+      await channel.sendMessage(`처리 중 오류: ${errMsg.slice(0, 200)}`);
     }
   }
 }
@@ -1372,7 +1373,8 @@ export async function startDaemon(): Promise<void> {
               } else {
                 log(`[queue] ${task.id} will retry (attempt ${task.retryCount + 1})`);
               }
-              await channel.sendMessage("처리 중 오류가 발생했습니다.").catch(() => {});
+              const queueErrMsg = err instanceof Error ? err.message : String(err);
+              await channel.sendMessage(`처리 중 오류: ${queueErrMsg.slice(0, 200)}`).catch(() => {});
             } finally {
               activePhones.delete(phone);
               await clearProgressState();
