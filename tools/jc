@@ -3,7 +3,7 @@
 # Usage:
 #   jc              → 새 Claude 세션 (bypass permissions)
 #   jc resume       → 마지막 세션 이어가기
-#   jc remote       → 추가 remote-control 세션 열기
+#   jc rc           → Claude 세션 + /remote-control 자동 실행 (tmux attach)
 #   jc restart      → 데몬 재시작
 #   jc status       → 데몬 + 세션 상태
 #   jc kill         → 데몬 + 모든 관련 프로세스 종료
@@ -44,20 +44,26 @@ for p in d.values():
     cd "$JUNECLAW_DIR" && exec claude --dangerously-skip-permissions
     ;;
 
-  remote)
-    # 추가 remote-control 세션 (bypass permissions)
-    name="${2:-juneclaw-extra}"
-    echo "Opening remote-control session: $name"
-    cd "$JUNECLAW_DIR" && exec claude remote-control \
-      --permission-mode bypassPermissions \
-      --name "$name"
+  rc|remote)
+    # claude --dangerously-skip-permissions 열고 /remote-control 자동 실행
+    session="${2:-jc-rc}"
+    if tmux has-session -t "$session" 2>/dev/null; then
+      echo "Session '$session' already running. Attaching..."
+      exec tmux attach -t "$session"
+    fi
+    echo "Starting Claude + /remote-control in tmux session: $session"
+    tmux new-session -d -s "$session" -c "$JUNECLAW_DIR" \
+      claude --dangerously-skip-permissions
+    # Wait for Claude CLI prompt to be ready, then send the slash command
+    sleep 2
+    tmux send-keys -t "$session" "/remote-control" Enter
+    exec tmux attach -t "$session"
     ;;
 
   restart)
     echo "Restarting JuneClaw daemon..."
     # Kill existing processes and clean up lock
     pkill -f "JuneClaw/dist/index" 2>/dev/null || true
-    pkill -f "remote-control.*juneclaw" 2>/dev/null || true
     pkill -f "progress-monitor.sh" 2>/dev/null || true
     sleep 2
     rm -f "$JUNECLAW_PID" "$JUNECLAW_LOCK"
@@ -104,9 +110,6 @@ for phone, types in d.items():
       echo "  No sessions"
     fi
 
-    echo "=== Remote Control ==="
-    pgrep -c -f "remote-control.*juneclaw" 2>/dev/null | xargs -I{} echo "  {} session(s)" || echo "  None"
-
     echo "=== Progress Monitor ==="
     pgrep -c -f "progress-monitor" 2>/dev/null | xargs -I{} echo "  {} process(es)" || echo "  None"
     ;;
@@ -114,7 +117,6 @@ for phone, types in d.items():
   kill)
     echo "Killing all JuneClaw processes..."
     pkill -9 -f "JuneClaw/dist/index" 2>/dev/null || true
-    pkill -9 -f "remote-control.*juneclaw" 2>/dev/null || true
     pkill -9 -f "progress-monitor.sh" 2>/dev/null || true
     rm -f "$JUNECLAW_PID" "$JUNECLAW_LOCK"
     echo "Done."
@@ -130,7 +132,7 @@ for phone, types in d.items():
     echo "Commands:"
     echo "  jc              새 Claude 세션 열기 (bypass permissions)"
     echo "  jc resume       마지막 세션 이어가기"
-    echo "  jc remote [name] 추가 remote-control 세션"
+    echo "  jc rc [session] Claude + /remote-control 자동 실행 (tmux)"
     echo "  jc restart      데몬 재시작"
     echo "  jc status       상태 확인"
     echo "  jc kill         전체 종료"

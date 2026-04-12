@@ -38,8 +38,7 @@ is_daemon_alive() {
 restart_daemon() {
   echo "[$(ts)] Restarting JuneClaw via launchctl..."
 
-  # Kill orphan children first (remote-control, progress-monitor)
-  pkill -f "remote-control.*juneclaw" 2>/dev/null || true
+  # Kill orphan children first (progress-monitor)
   pkill -f "progress-monitor.sh" 2>/dev/null || true
 
   # Remove stale lock/pid files so the new daemon can start cleanly
@@ -72,7 +71,7 @@ daemon_pid=""
 if [ -f "$JUNECLAW_PID" ]; then
   daemon_pid=$(cat "$JUNECLAW_PID")
 fi
-for orphan_pid in $(pgrep -f "remote-control.*juneclaw" 2>/dev/null) $(pgrep -f "progress-monitor.sh" 2>/dev/null); do
+for orphan_pid in $(pgrep -f "progress-monitor.sh" 2>/dev/null); do
   parent=$(ps -p "$orphan_pid" -o ppid= 2>/dev/null | tr -d ' ')
   # If parent is init (1) or a dead process, it's an orphan
   if [ -n "$parent" ] && [ "$parent" != "$daemon_pid" ]; then
