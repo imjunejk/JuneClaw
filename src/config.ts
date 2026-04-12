@@ -18,11 +18,6 @@ export const config = {
       quietHours: { start: 23, end: 6 },
     },
   },
-  remoteControl: {
-    enabled: (process.env.JUNECLAW_REMOTE_CONTROL ?? "true") !== "false",
-    name: process.env.JUNECLAW_REMOTE_CONTROL_NAME ?? "juneclaw",
-    respawnDelayMs: 5_000,
-  },
   claude: {
     bin: "claude",
     permissionMode: "bypassPermissions" as const,

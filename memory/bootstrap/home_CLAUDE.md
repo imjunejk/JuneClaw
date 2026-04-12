@@ -6,10 +6,9 @@
 
 ## 리모트 컨트롤 열기
 ```bash
-tmux send-keys -t juneclaw-rc "/remote-control" Enter
-sleep 5
-tmux capture-pane -t juneclaw-rc -p -S -30 | grep "claude.ai/code/session"
+jc rc               # claude --dangerously-skip-permissions + /remote-control (tmux attach)
 ```
+데몬이 RC를 유지하지 않음. 필요할 때만 이 명령으로 수동 오픈.
 
 ## 육사 전략 (AgiTQ 60% + SEPA 40%)
 - AgiTQ: TQQQ 200일선 3구간 (하락→SGOV / 집중투자→TQQQ 2일확인 / 과열→SPY)

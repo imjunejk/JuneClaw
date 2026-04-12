@@ -1,14 +1,12 @@
 # JuneClaw — Claude Code 행동 규칙
 
 ## 리모트 컨트롤 열기
-"클로드 열어줘" / "리모트 컨트롤 열어줘" 요청 시:
+"클로드 코드 열어줘" / "리모트 컨트롤 열어줘" 요청 시 `jc rc` 사용:
 ```bash
-tmux send-keys -t juneclaw-rc "/remote-control" Enter
-sleep 5
-tmux capture-pane -t juneclaw-rc -p -S -30 | grep "claude.ai/code/session"
+jc rc               # claude --dangerously-skip-permissions + /remote-control 자동 실행 (tmux attach)
 ```
-웹 링크(`https://claude.ai/code/session_XXXXX`)를 유저에게 전달.
-절대 `claude --dangerously-skip-permissions`를 Bash 백그라운드로 실행하지 말 것 — TTY 없어서 즉시 종료됨.
+내부 동작: tmux 세션 `jc-rc`에서 Claude CLI를 띄우고 `/remote-control` 슬래시 커맨드를 자동으로 전송 후 attach.
+세션이 이미 있으면 attach만. 데몬이 RC를 백그라운드에서 유지하지 않으므로, 필요할 때만 이 명령으로 수동 오픈.
 
 ## 시스템 구조
 - JuneClaw: AI 에이전트 게이트웨이 (Node.js + iMessage)

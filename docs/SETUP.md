@@ -54,8 +54,8 @@ cp memory/bootstrap/juneclaw_*.md ~/.claude/projects/-Users-$(whoami)-JuneClaw/m
 # 데몬 상태
 launchctl list | grep juneclaw
 
-# 리모트 컨트롤
-tmux attach -t juneclaw-rc
+# 리모트 컨트롤 (필요시 수동 오픈)
+jc rc
 
 # 로그
 tail -f ~/.juneclaw/logs/daemon.log
