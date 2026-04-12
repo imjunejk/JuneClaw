@@ -59,10 +59,11 @@ for p in d.values():
     # slash command. A fixed sleep is flaky — cold starts (MCP/memory load)
     # can exceed several seconds. We wait up to ~20s, checking every 500ms
     # for either the input-box border char "│ >" or the ASCII fallback "> ".
+    # NOTE: [[:space:]] instead of \s for BSD grep (macOS) compatibility.
     ready=0
-    for _ in $(seq 1 40); do
+    for i in $(seq 1 40); do
       if tmux capture-pane -t "$session" -p 2>/dev/null \
-           | grep -Eq '│ >|^\s*> '; then
+           | grep -Eq '│ >|^[[:space:]]*> '; then
         ready=1
         break
       fi
@@ -70,6 +71,9 @@ for p in d.values():
     done
     if [ "$ready" -eq 0 ]; then
       echo "Warning: Claude CLI prompt not detected within 20s — sending anyway." >&2
+      # Give the user a moment to notice the warning before tmux attach
+      # replaces the terminal UI.
+      sleep 2
     fi
     tmux send-keys -t "$session" "/remote-control" Enter
     exec tmux attach -t "$session"
