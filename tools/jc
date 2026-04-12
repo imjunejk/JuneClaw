@@ -54,8 +54,23 @@ for p in d.values():
     echo "Starting Claude + /remote-control in tmux session: $session"
     tmux new-session -d -s "$session" -c "$JUNECLAW_DIR" \
       claude --dangerously-skip-permissions
-    # Wait for Claude CLI prompt to be ready, then send the slash command
-    sleep 2
+
+    # Poll the tmux pane until Claude CLI's prompt is ready, then send the
+    # slash command. A fixed sleep is flaky — cold starts (MCP/memory load)
+    # can exceed several seconds. We wait up to ~20s, checking every 500ms
+    # for either the input-box border char "│ >" or the ASCII fallback "> ".
+    ready=0
+    for _ in $(seq 1 40); do
+      if tmux capture-pane -t "$session" -p 2>/dev/null \
+           | grep -Eq '│ >|^\s*> '; then
+        ready=1
+        break
+      fi
+      sleep 0.5
+    done
+    if [ "$ready" -eq 0 ]; then
+      echo "Warning: Claude CLI prompt not detected within 20s — sending anyway." >&2
+    fi
     tmux send-keys -t "$session" "/remote-control" Enter
     exec tmux attach -t "$session"
     ;;
