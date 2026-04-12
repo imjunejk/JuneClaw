@@ -655,7 +655,10 @@ async function processMessage(
         );
       } catch (err) {
         logError("[handoff] smart handoff failed, falling back to basic", err);
-        markHandoffDone(phone);
+        // Do NOT call markHandoffDone here — smart handoff failed, so
+        // executeRotation must be allowed to write the basic HANDOFF.md
+        // as a fallback. Calling markHandoffDone would make executeRotation
+        // skip writeHandoff and leave HANDOFF.md stale.
         await executeRotation(phone, "token_threshold", taskType);
         await channel.sendMessage(
           `핸드오프 실패 — 기본 핸드오프로 ${taskType} 세션을 리셋합니다.`,
