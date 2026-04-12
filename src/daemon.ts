@@ -31,7 +31,6 @@ import {
   shouldWarnContext,
   shouldHandoff,
   markHandoffDone,
-  isHandoffDone,
   executeRotation,
   resetRotationState,
   getMessageCount,
@@ -855,8 +854,7 @@ async function processMessage(
       const pct = result.usage?.usagePercent ?? 0;
       const pctStr = pct ? pct.toFixed(0) : "?";
       if (
-        !isHandoffDone(phone)
-        && result.sessionId
+        result.sessionId
         && postReason === "token_threshold"
         && pct < 95
       ) {
