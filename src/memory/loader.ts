@@ -67,13 +67,13 @@ interface ImsgHistoryMessage {
   created_at: string;
 }
 
-async function fetchRecentMessages(): Promise<string | null> {
+async function fetchRecentMessages(chatId?: number): Promise<string | null> {
   try {
-    const chatId = config.channels.june.chatId;
+    const resolvedChatId = chatId ?? config.channels.june.chatId;
     const { stdout } = await execFileAsync("imsg", [
       "history",
       "--chat-id",
-      String(chatId),
+      String(resolvedChatId),
       "--limit",
       "10",
       "--json",
@@ -147,10 +147,28 @@ function hashContent(content: string): string {
  * Sections are sorted alphabetically by label within each group to maintain
  * byte-identical ordering — if the order shifts, the API cache breaks.
  */
-async function buildStaticPrompt(taskType: TaskType): Promise<string> {
+async function buildStaticPrompt(taskType: TaskType, channelId?: string): Promise<string> {
   const ws = config.workspace;
 
-  // Core identity files — sorted alphabetically
+  // Resolve channel access level
+  const channelKey = channelId as keyof typeof config.channels | undefined;
+  const channelConfig = channelKey && config.channels[channelKey]
+    ? config.channels[channelKey]
+    : config.channels.june;
+  const isRestricted = channelConfig.accessLevel === "general";
+
+  if (isRestricted) {
+    // Lightweight persona for restricted channels (e.g. hamtol)
+    const personaPath = join(ws, "personas", `${channelId}.md`);
+    const persona = await loadFileOrNull(personaPath);
+    const sections: string[] = [];
+    if (persona) {
+      sections.push(`## PERSONA\n${truncate(persona.trim(), 5000)}`);
+    }
+    return sections.join("\n\n");
+  }
+
+  // Full identity for unrestricted channels (june)
   const coreFiles: FileSpec[] = [
     { label: "AGENTS", path: join(ws, "AGENTS.md"), maxChars: 5000 },
     { label: "COMMUNICATION RULES", path: join(ws, "docs", "communication-rules.md"), maxChars: 5000 },
@@ -306,27 +324,55 @@ async function buildDynamicPrompt(
   const memorySections = await loadMemoryIndex(ws);
   sections.push(...memorySections);
 
-  // Conversation history
-  const conversationHistory = await fetchRecentMessages();
+  // Resolve channel config from channelId
+  const channelKey = Object.keys(config.channels).find(
+    (k) => k === channelId || config.channels[k as keyof typeof config.channels].phone === channelId,
+  ) as keyof typeof config.channels | undefined;
+  const channelConfig = channelKey ? config.channels[channelKey] : config.channels.june;
+  const isRestricted = channelConfig.accessLevel === "general";
 
-  // Runtime context
-  const phone = config.channels.june.phone;
+  // Conversation history (from this channel's chatId)
+  const conversationHistory = await fetchRecentMessages(channelConfig.chatId);
+
+  // Runtime context — varies by channel access level
+  const phone = channelConfig.phone;
   const toolsPath = config.subAgents.toolsPath;
-  const sessionType = taskType;
-  const taskRoleMap: Record<TaskType, string> = {
-    coding: `Session type: CODING — Apply Youngsik (Frontend) and Youngchul (Backend) engineering principles.
+
+  let runtimeContext: string;
+
+  if (isRestricted) {
+    runtimeContext = `<runtime_context>
+Time: ${formatTimePT(today)}
+Channel: iMessage from ${senderName} (${phone})
+You are Youngsu. Read the persona file loaded in the static prompt for your behavior with this user.
+Session type: GENERAL — general help only. No coding, trading, or file management.
+You have Bash tool — use it to call: imsg, weather via wttr.in, WebSearch, WebFetch
+
+Message delivery: The daemon auto-sends your text response as an iMessage. Do NOT also send it yourself via "imsg send" — that causes duplicates.
+
+Access restrictions for this channel:
+- NO stock trading, portfolio queries, or financial operations
+- NO code writing, debugging, PR management, or git operations
+- NO system file access or modification
+- NO sharing June's private work information
+- If asked about restricted topics, politely redirect: "준한테 직접 물어봐!"
+</runtime_context>`;
+  } else {
+    const sessionType = taskType;
+    const taskRoleMap: Record<TaskType, string> = {
+      coding: `Session type: CODING — Apply Youngsik (Frontend) and Youngchul (Backend) engineering principles.
 Focus: implementation quality, type safety, testing, code review standards.
 Available on-demand (read strategy file before delegating): Junho (QA), Taeyoung (DevOps), Youngho (Design).`,
-    research: `Session type: RESEARCH — Apply Kwangsoo (Strategy) and Sangchul (Marketing) analysis principles.
+      research: `Session type: RESEARCH — Apply Kwangsoo (Strategy) and Sangchul (Marketing) analysis principles.
 Focus: evidence-based analysis, source hierarchy (S-Tier > A-Tier), market sizing, competitive intelligence.
 Available on-demand: Kwangsoo for deep financial/trading analysis.`,
-    general: `Session type: GENERAL — You are the orchestrator (PM/Director).
+      general: `Session type: GENERAL — You are the orchestrator (PM/Director).
 Focus: planning, coordination, delegation, product decisions, user communication.
 Delegate to sub-agents when specialized work is needed.`,
-    quick: `Session type: QUICK — Concise response only.`,
-  };
+      quick: `Session type: QUICK — Concise response only.`,
+    };
 
-  const runtimeContext = `<runtime_context>
+    runtimeContext = `<runtime_context>
 Time: ${formatTimePT(today)}
 Channel: iMessage from ${senderName} (${phone})
 You are Youngsu. Respond in the style defined in SOUL.md.
@@ -343,6 +389,7 @@ Sub-agent delegation (use Agent tool):
 
 Send iMessage (proactive only): Bash("imsg send --to ${phone} --text \\"...\\"")
 </runtime_context>`;
+  }
 
   const parts = sections;
   if (conversationHistory) {
@@ -381,16 +428,17 @@ export async function buildSystemPromptSplit(
   taskType?: TaskType,
 ): Promise<SystemPromptResult> {
   const tt = taskType ?? "general";
+  const cacheKey = `${channelId}/${tt}`;
 
   // Build static prompt (check cache first)
-  let staticContent = await buildStaticPrompt(tt);
+  let staticContent = await buildStaticPrompt(tt, channelId);
   const currentHash = hashContent(staticContent);
 
-  const cached = staticCache.get(tt);
+  const cached = staticCache.get(cacheKey);
   if (cached && cached.hash === currentHash) {
     staticContent = cached.content; // byte-identical for API cache
   } else {
-    staticCache.set(tt, { hash: currentHash, content: staticContent });
+    staticCache.set(cacheKey, { hash: currentHash, content: staticContent });
   }
 
   // Build dynamic prompt (always fresh)

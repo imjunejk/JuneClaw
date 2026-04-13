@@ -16,6 +16,14 @@ export const config = {
       chatId: 1,
       name: "June",
       quietHours: { start: 23, end: 6 },
+      accessLevel: "full" as const,
+    },
+    hamtol: {
+      phone: process.env.JUNECLAW_HAMTOL_PHONE ?? "+14156938975",
+      chatId: 7,
+      name: "햄톨",
+      quietHours: { start: 23, end: 6 },
+      accessLevel: "general" as const,
     },
   },
   claude: {
@@ -161,3 +169,9 @@ export const config = {
 };
 
 export type ChannelConfig = (typeof config.channels)[keyof typeof config.channels];
+export type ChannelKey = keyof typeof config.channels;
+
+export function getChannelKey(phone: string): ChannelKey {
+  const entry = Object.entries(config.channels).find(([_, ch]) => ch.phone === phone);
+  return (entry?.[0] ?? "june") as ChannelKey;
+}

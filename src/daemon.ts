@@ -4,7 +4,7 @@ import { promisify } from "node:util";
 import { dirname, join } from "node:path";
 
 const execFileAsync = promisify(execFile);
-import { config, type ChannelConfig, type TaskType } from "./config.js";
+import { config, getChannelKey, type ChannelConfig, type ChannelKey, type TaskType } from "./config.js";
 import { createIMessageChannel } from "./gateway/imessage.js";
 import { handleCommand } from "./gateway/commands.js";
 import { runClaude } from "./agent/runner.js";
@@ -530,7 +530,8 @@ async function processMessage(
   }
 
   // Build system prompt with task-specific strategy injection
-  let systemPrompt = await buildSystemPrompt("imessage", name, taskType);
+  const channelKey = getChannelKey(phone);
+  let systemPrompt = await buildSystemPrompt(channelKey, name, taskType);
   const recentCtx = getRecentContext();
   const sharedCtx = await getSharedContext();
   if (recentCtx) systemPrompt += "\n\n" + recentCtx;
@@ -975,8 +976,16 @@ export async function startDaemon(): Promise<void> {
   // Restore recent exchanges from disk (survives daemon restart)
   await loadRecentExchanges();
 
-  const ch = config.channels.june;
-  const channel = createIMessageChannel(ch.phone, ch.chatId);
+  // Create channels for all configured contacts
+  const channelEntries = Object.entries(config.channels).map(([key, ch]) => ({
+    key: key as ChannelKey,
+    config: ch,
+    channel: createIMessageChannel(ch.phone, ch.chatId),
+  }));
+  const channelByPhone = new Map(channelEntries.map((e) => [e.config.phone, e]));
+
+  // Primary channel (June) — used for heartbeat, cron, startup notifications
+  const juneEntry = channelEntries.find((e) => e.key === "june")!;
 
   // Recover orphaned queue items from previous crash
   const recovered = await messageQueue.recover();
@@ -995,11 +1004,12 @@ export async function startDaemon(): Promise<void> {
   await appendSystemLog(`Daemon started (PID: ${process.pid})`);
   await emit("daemon:startup", { pid: process.pid });
 
+  const channelNames = channelEntries.map((e) => `${e.config.name} (${e.config.phone})`).join(", ");
   log(
-    `juneclaw daemon started — polling ${ch.name} (${ch.phone}) every ${config.poll.intervalMs}ms`,
+    `juneclaw daemon started — polling ${channelNames} every ${config.poll.intervalMs}ms`,
   );
 
-  initCronScheduler(channel, ch);
+  initCronScheduler(juneEntry.channel, juneEntry.config);
 
   // Clean stale progress state from previous run
   await clearProgressState();
@@ -1012,7 +1022,7 @@ export async function startDaemon(): Promise<void> {
   log(startupReport.log);
 
   // Notify June that daemon has started with session summary
-  await channel.sendMessage(startupReport.message).catch((err) => {
+  await juneEntry.channel.sendMessage(startupReport.message).catch((err) => {
     log(`[startup] failed to send restart notification: ${err instanceof Error ? err.message : String(err)}`);
   });
 
@@ -1059,79 +1069,86 @@ export async function startDaemon(): Promise<void> {
     saveState().catch(() => {});
 
     try {
-      const messages = await channel.pollNewMessages();
+      // Poll all channels
+      for (const entry of channelEntries) {
+        const { channel: ch, config: chConfig } = entry;
+        const messages = await ch.pollNewMessages();
 
-      for (const msg of messages) {
-        if (processedIds.has(msg.id)) continue;
-        processedIds.add(msg.id);
+        for (const msg of messages) {
+          if (processedIds.has(msg.id)) continue;
+          processedIds.add(msg.id);
 
-        // /btw while workers busy — queue for follow-up
-        if (workerPool.activeCount > 0 && msg.text.trim().startsWith("/btw ")) {
-          const btw = msg.text.trim().slice(5);
-          btwQueue.push(btw);
-          log(`[btw] queued: ${btw.slice(0, 60)}...`);
-          await channel.sendMessage(`메모 접수: ${btw.slice(0, 40)}...`);
-          continue;
-        }
+          // /btw while workers busy — queue for follow-up (June only)
+          if (entry.key === "june" && workerPool.activeCount > 0 && msg.text.trim().startsWith("/btw ")) {
+            const btw = msg.text.trim().slice(5);
+            btwQueue.push(btw);
+            log(`[btw] queued: ${btw.slice(0, 60)}...`);
+            await ch.sendMessage(`메모 접수: ${btw.slice(0, 40)}...`);
+            continue;
+          }
 
-        log(`[incoming] ${msg.sender}: ${msg.text.slice(0, 80)}...`);
+          log(`[incoming] [${chConfig.name}] ${msg.sender}: ${msg.text.slice(0, 80)}...`);
 
-        // User message → override quiet hours for 1 hour
-        quietHoursOverrideUntil = Date.now() + 60 * 60 * 1000;
+          // User message → override quiet hours for 1 hour
+          quietHoursOverrideUntil = Date.now() + 60 * 60 * 1000;
 
-        // Classify the task (Sonnet CLI native, ~1-2s)
-        let taskType: TaskType;
-        try {
-          taskType = await classifyTask(msg.text);
-        } catch {
-          taskType = "general";
-        }
-
-        // Quick lane: process immediately even if heavy work is ongoing
-        if (taskType === "quick") {
-          processQuickMessage(channel, ch.name, ch.phone, msg.text).catch((err) => {
-            logError("[quick] fire-and-forget failed", err);
-          });
-          continue;
-        }
-
-        // Heavy lane: enqueue to durable queue (never drops)
-        // Use msg.id as stable key to prevent duplicate enqueue from iMessage polling glitches
-        const priority = taskPriority[taskType] ?? 2;
-        const queueId = `${priority}-${msg.id}`;
-        const queueResult = await messageQueue.enqueue({
-          text: msg.text,
-          taskType,
-          phone: ch.phone,
-          enqueuedAt: Date.now(),
-        }, queueId);
-        const pending = await messageQueue.pendingCount();
-        log(`[queue] enqueued ${queueResult} (${taskType}), ${pending} pending`);
-      }
-
-      // ── /btw drain: flush btw queue before dispatching new work ──
-      if (btwQueue.length > 0 && workerPool.hasCapacity() && !activePhones.has(ch.phone)) {
-        const btws = btwQueue.splice(0);
-        const followUp = btws.length === 1
-          ? `[작업 중 추가 메시지] ${btws[0]}`
-          : `[작업 중 추가 메시지]\n${btws.map((b) => `- ${b}`).join("\n")}`;
-        log(`[btw] processing ${btws.length} queued message(s)`);
-        activePhones.add(ch.phone);
-        await workerPool.submit(
-          async () => {
+          // Restricted channels always route to "general"
+          let taskType: TaskType;
+          if (chConfig.accessLevel === "general") {
+            taskType = "general";
+          } else {
             try {
-              await writeProgressState("general", followUp, ch.phone);
-              await withProcessingLiveness(() => processMessage(channel, ch, followUp, "general"));
-              await incrementSessionCount();
-            } catch (err) {
-              logError("Failed to process /btw follow-up", err);
-            } finally {
-              activePhones.delete(ch.phone);
-              await clearProgressState();
+              taskType = await classifyTask(msg.text);
+            } catch {
+              taskType = "general";
             }
-          },
-          { taskType: "general", description: "btw follow-up" },
-        );
+          }
+
+          // Quick lane: process immediately even if heavy work is ongoing
+          if (taskType === "quick") {
+            processQuickMessage(ch, chConfig.name, chConfig.phone, msg.text).catch((err) => {
+              logError("[quick] fire-and-forget failed", err);
+            });
+            continue;
+          }
+
+          // Heavy lane: enqueue to durable queue (never drops)
+          const priority = taskPriority[taskType] ?? 2;
+          const queueId = `${priority}-${msg.id}`;
+          const queueResult = await messageQueue.enqueue({
+            text: msg.text,
+            taskType,
+            phone: chConfig.phone,
+            enqueuedAt: Date.now(),
+          }, queueId);
+          const pending = await messageQueue.pendingCount();
+          log(`[queue] enqueued ${queueResult} (${taskType}) from ${chConfig.name}, ${pending} pending`);
+        }
+
+        // /btw drain: June only
+        if (entry.key === "june" && btwQueue.length > 0 && workerPool.hasCapacity() && !activePhones.has(chConfig.phone)) {
+          const btws = btwQueue.splice(0);
+          const followUp = btws.length === 1
+            ? `[작업 중 추가 메시지] ${btws[0]}`
+            : `[작업 중 추가 메시지]\n${btws.map((b) => `- ${b}`).join("\n")}`;
+          log(`[btw] processing ${btws.length} queued message(s)`);
+          activePhones.add(chConfig.phone);
+          await workerPool.submit(
+            async () => {
+              try {
+                await writeProgressState("general", followUp, chConfig.phone);
+                await withProcessingLiveness(() => processMessage(ch, chConfig, followUp, "general"));
+                await incrementSessionCount();
+              } catch (err) {
+                logError("Failed to process /btw follow-up", err);
+              } finally {
+                activePhones.delete(chConfig.phone);
+                await clearProgressState();
+              }
+            },
+            { taskType: "general", description: "btw follow-up" },
+          );
+        }
       }
 
       // ── Worker Pool Drain: claim tasks from queue, submit to pool ──
@@ -1141,24 +1158,28 @@ export async function startDaemon(): Promise<void> {
 
         const { text, taskType: tt, phone } = task.data;
 
+        // Find the channel entry for this phone
+        const entry = channelByPhone.get(phone);
+        if (!entry) {
+          log(`[pool] unknown phone ${phone}, moving to dead letter`);
+          await messageQueue.fail(task.id, `unknown phone: ${phone}`);
+          continue;
+        }
+
         // Per-phone serialization: skip if this phone already has an active worker
-        // to prevent session/context conflicts from concurrent Claude CLI calls
         if (activePhones.has(phone)) {
-          // Release back to pending without incrementing retryCount.
-          // Break (not continue) — same file would be re-claimed in a busy loop.
-          // Next poll cycle (2s) will retry.
           await messageQueue.release(task.id);
           break;
         }
 
-        log(`[pool] dispatching ${task.id} (${tt}): ${text.slice(0, 60)}...`);
+        log(`[pool] dispatching ${task.id} (${tt}) [${entry.config.name}]: ${text.slice(0, 60)}...`);
         activePhones.add(phone);
 
         await workerPool.submit(
           async () => {
             try {
               await writeProgressState(tt, text, phone);
-              await withProcessingLiveness(() => processMessage(channel, ch, text, tt));
+              await withProcessingLiveness(() => processMessage(entry.channel, entry.config, text, tt));
               await messageQueue.complete(task.id);
               await incrementSessionCount();
             } catch (err) {
@@ -1173,7 +1194,7 @@ export async function startDaemon(): Promise<void> {
                 log(`[queue] ${task.id} will retry (attempt ${task.retryCount + 1})`);
               }
               const queueErrMsg = err instanceof Error ? err.message : String(err);
-              await channel.sendMessage(`처리 중 오류: ${queueErrMsg.slice(0, 200)}`).catch(() => {});
+              await entry.channel.sendMessage(`처리 중 오류: ${queueErrMsg.slice(0, 200)}`).catch(() => {});
             } finally {
               activePhones.delete(phone);
               await clearProgressState();
