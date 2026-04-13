@@ -14,8 +14,8 @@ const SYSTEM_CONTEXT = `
   월 06:20 리밸런싱 | 06:25 SEPA 스캔+리밋 | 06:35 SEPA 체결확인
   12:50 AgiTQ 준비 | 12:57 AgiTQ 실행(종가 3분전 market) | 13:02 AgiTQ followup(limit)
 - Alpaca 라이브 계좌, AGITQ_SYMBOLS: {TQQQ, SGOV, SPY}
-- 코드: /Users/jp/gwangsu-algo (GitHub: imjunejk/gwangsu-algo)
-- JuneClaw: /Users/jp/JuneClaw (GitHub: imjunejk/gwangsu)
+- 코드: /Users/jp/gwangsu/algo (GitHub: imjunejk/gwangsu)
+- JuneClaw: /Users/jp/JuneClaw
 `.trim();
 
 export { SYSTEM_CONTEXT };

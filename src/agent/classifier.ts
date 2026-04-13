@@ -25,6 +25,7 @@ const COMMAND_OVERRIDES: Record<string, TaskType> = {
   "/review": "coding",
   "/research": "research",
   "/search": "research",
+  "/실행": "general",
 };
 
 function spawnClassifier(text: string): Promise<string> {

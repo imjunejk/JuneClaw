@@ -37,7 +37,7 @@ echo "  ✅ 빌드 완료"
 # ── 3. .env 설정 ──
 echo ""
 echo "[3/8] 환경 변수 설정..."
-ALGO_DIR="$HOME_DIR/gwangsu-algo"
+ALGO_DIR="$HOME_DIR/gwangsu/algo"
 
 if [ ! -f "$ALGO_DIR/.env" ]; then
     if [ -f "$SCRIPT_DIR/env.example" ]; then
@@ -90,17 +90,17 @@ else
     echo "  ✅ JuneClaw 메모리 이미 존재"
 fi
 
-# gwangsu-algo 메모리
-AMEM="$HOME_DIR/.claude/projects/-Users-$(whoami)-gwangsu-algo/memory"
+# gwangsu/algo 메모리
+AMEM="$HOME_DIR/.claude/projects/-Users-$(whoami)-gwangsu/algo/memory"
 mkdir -p "$AMEM"
 if [ ! -f "$AMEM/MEMORY.md" ]; then
     for f in "$BOOTSTRAP_DIR"/algo_*.md; do
         [ -f "$f" ] && cp "$f" "$AMEM/$(basename "$f" | sed 's/^algo_//')"
     done
     [ -f "$BOOTSTRAP_DIR/algo_MEMORY.md" ] && cp "$BOOTSTRAP_DIR/algo_MEMORY.md" "$AMEM/MEMORY.md"
-    echo "  ✅ gwangsu-algo 메모리 초기화"
+    echo "  ✅ gwangsu/algo 메모리 초기화"
 else
-    echo "  ✅ gwangsu-algo 메모리 이미 존재"
+    echo "  ✅ gwangsu/algo 메모리 이미 존재"
 fi
 
 # ── 6. ~/CLAUDE.md ──
@@ -117,7 +117,7 @@ fi
 echo ""
 echo "[7/8] 크론탭 설치..."
 if [ -f "$ALGO_DIR/crontab.txt" ]; then
-    echo "  현재 크론탭을 gwangsu-algo/crontab.txt로 교체할까요? (y/N)"
+    echo "  현재 크론탭을 gwangsu/algo/crontab.txt로 교체할까요? (y/N)"
     read -r response
     if [[ "$response" =~ ^[Yy]$ ]]; then
         crontab "$ALGO_DIR/crontab.txt"
@@ -126,7 +126,7 @@ if [ -f "$ALGO_DIR/crontab.txt" ]; then
         echo "  ⏭️ 스킵"
     fi
 else
-    echo "  ⚠️ gwangsu-algo/crontab.txt 없음"
+    echo "  ⚠️ gwangsu/algo/crontab.txt 없음"
 fi
 
 # ── 8. 데몬 시작 ──

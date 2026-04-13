@@ -1,12 +1,12 @@
 ---
 name: 광수 시스템 구조
-description: JuneClaw + gwangsu-algo 두 프로젝트의 전체 구조와 육사 전략.
+description: JuneClaw + gwangsu/algo 두 프로젝트의 전체 구조와 육사 전략.
 type: project
 ---
 
 ## Repos
 - `/Users/jp/JuneClaw` — AI agent gateway (Node.js + iMessage)
-- `/Users/jp/gwangsu-algo` — Trading algorithm (Python + Alpaca)
+- `/Users/jp/gwangsu/algo` — Trading algorithm (Python + Alpaca)
 
 ## 육사 전략 (AgiTQ 60% + SEPA 40%)
 - AgiTQ: TQQQ 200일선 3구간 (하락→SGOV / 집중투자→TQQQ / 과열→SPY)

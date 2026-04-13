@@ -13,7 +13,7 @@ import { writeHandoff } from "../memory/handoff.js";
 
 const execFileAsync = promisify(execFile);
 
-const ALGO_DIR = join(homedir(), "gwangsu-algo");
+const ALGO_DIR = join(homedir(), "gwangsu", "algo");
 const TRADE_EXECUTOR = join(ALGO_DIR, "trade_executor.py");
 const ALGO_PYTHON = join(ALGO_DIR, ".venv", "bin", "python");
 

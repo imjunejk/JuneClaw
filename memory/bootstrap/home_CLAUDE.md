@@ -2,7 +2,7 @@
 
 ## 프로젝트 구조
 - `/Users/jp/JuneClaw` — AI 에이전트 게이트웨이 (Node.js + iMessage)
-- `/Users/jp/gwangsu-algo` — 트레이딩 알고리즘 (Python + Alpaca)
+- `/Users/jp/gwangsu/algo` — 트레이딩 알고리즘 (Python + Alpaca)
 
 ## 리모트 컨트롤 열기
 ```bash

@@ -25,8 +25,8 @@ npm run build
 
 ### 2. 환경 변수
 ```bash
-cp setup/env.example ../gwangsu-algo/.env
-nano ../gwangsu-algo/.env  # API 키 입력
+cp setup/env.example ../gwangsu/algo/.env
+nano ../gwangsu/algo/.env  # API 키 입력
 ```
 
 ### 3. LaunchAgent (자동 시작)
@@ -38,7 +38,7 @@ launchctl load ~/Library/LaunchAgents/ai.juneclaw.daemon.plist
 
 ### 4. 크론탭
 ```bash
-crontab ../gwangsu-algo/crontab.txt
+crontab ../gwangsu/algo/crontab.txt
 ```
 
 ### 5. 메모리 초기화
