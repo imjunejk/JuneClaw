@@ -164,6 +164,8 @@ async function buildStaticPrompt(taskType: TaskType, channelId?: string): Promis
     const sections: string[] = [];
     if (persona) {
       sections.push(`## PERSONA\n${truncate(persona.trim(), 5000)}`);
+    } else {
+      console.warn(`[loader] persona file missing for restricted channel "${channelId}": ${personaPath}`);
     }
     return sections.join("\n\n");
   }
@@ -324,11 +326,11 @@ async function buildDynamicPrompt(
   const memorySections = await loadMemoryIndex(ws);
   sections.push(...memorySections);
 
-  // Resolve channel config from channelId
-  const channelKey = Object.keys(config.channels).find(
-    (k) => k === channelId || config.channels[k as keyof typeof config.channels].phone === channelId,
-  ) as keyof typeof config.channels | undefined;
-  const channelConfig = channelKey ? config.channels[channelKey] : config.channels.june;
+  // Resolve channel config from channelId (always a ChannelKey, e.g. "june" | "hamtol")
+  const channelKey = channelId as keyof typeof config.channels | undefined;
+  const channelConfig = channelKey && config.channels[channelKey]
+    ? config.channels[channelKey]
+    : config.channels.june;
   const isRestricted = channelConfig.accessLevel === "general";
 
   // Conversation history (from this channel's chatId)

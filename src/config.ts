@@ -173,5 +173,8 @@ export type ChannelKey = keyof typeof config.channels;
 
 export function getChannelKey(phone: string): ChannelKey {
   const entry = Object.entries(config.channels).find(([_, ch]) => ch.phone === phone);
+  if (!entry) {
+    console.warn(`[config] unknown phone ${phone}, falling back to "june"`);
+  }
   return (entry?.[0] ?? "june") as ChannelKey;
 }
