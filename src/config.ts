@@ -178,3 +178,8 @@ export function getChannelKey(phone: string): ChannelKey {
   }
   return (entry?.[0] ?? "june") as ChannelKey;
 }
+
+export function resolveChannelConfig(channelId: string): ChannelConfig {
+  const key = channelId as ChannelKey;
+  return config.channels[key] ?? config.channels.june;
+}
