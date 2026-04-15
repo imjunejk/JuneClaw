@@ -3,7 +3,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
-import { config, type TaskType } from "../config.js";
+import { config, resolveChannelConfig, type TaskType } from "../config.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -150,11 +150,7 @@ function hashContent(content: string): string {
 async function buildStaticPrompt(taskType: TaskType, channelId?: string): Promise<string> {
   const ws = config.workspace;
 
-  // Resolve channel access level
-  const channelKey = channelId as keyof typeof config.channels | undefined;
-  const channelConfig = channelKey && config.channels[channelKey]
-    ? config.channels[channelKey]
-    : config.channels.june;
+  const channelConfig = resolveChannelConfig(channelId ?? "june");
   const isRestricted = channelConfig.accessLevel === "general";
 
   if (isRestricted) {
@@ -326,11 +322,7 @@ async function buildDynamicPrompt(
   const memorySections = await loadMemoryIndex(ws);
   sections.push(...memorySections);
 
-  // Resolve channel config from channelId (always a ChannelKey, e.g. "june" | "hamtol")
-  const channelKey = channelId as keyof typeof config.channels | undefined;
-  const channelConfig = channelKey && config.channels[channelKey]
-    ? config.channels[channelKey]
-    : config.channels.june;
+  const channelConfig = resolveChannelConfig(channelId);
   const isRestricted = channelConfig.accessLevel === "general";
 
   // Conversation history (from this channel's chatId)

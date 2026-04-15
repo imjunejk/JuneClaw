@@ -4,7 +4,7 @@ import { promisify } from "node:util";
 import { dirname, join } from "node:path";
 
 const execFileAsync = promisify(execFile);
-import { config, getChannelKey, type ChannelConfig, type ChannelKey, type TaskType } from "./config.js";
+import { config, getChannelKey, resolveChannelConfig, type ChannelConfig, type ChannelKey, type TaskType } from "./config.js";
 import { createIMessageChannel } from "./gateway/imessage.js";
 import { handleCommand } from "./gateway/commands.js";
 import { runClaude } from "./agent/runner.js";
@@ -85,7 +85,7 @@ const state: DaemonState = {
 };
 
 const quietMode = new Map<string, boolean>();
-let quietHoursOverrideUntil: number = 0;
+const quietHoursOverrideUntil = new Map<string, number>();
 let daemonLock: DaemonLock | null = null;
 
 const processedIds = new Set<number>();
@@ -358,7 +358,8 @@ async function saveState(): Promise<void> {
 }
 
 function isQuietHour(ch: ChannelConfig): boolean {
-  if (Date.now() < quietHoursOverrideUntil) return false;
+  const override = quietHoursOverrideUntil.get(ch.phone) ?? 0;
+  if (Date.now() < override) return false;
   const now = new Date();
   const hour = Number(
     now.toLocaleString("en-US", {
@@ -442,7 +443,8 @@ async function processQuickMessage(
       log(`[quick→heavy] escalating to general session: ${text.slice(0, 60)}...`);
       await channel.sendMessage("잠시만요, 더 자세히 확인하고 답할게요.");
       try {
-        await processMessage(channel, { phone, name } as ChannelConfig, text, "general");
+        const channelKey = getChannelKey(phone);
+        await processMessage(channel, config.channels[channelKey], text, "general");
       } catch (heavyErr) {
         const heavyErrMsg = heavyErr instanceof Error ? heavyErr.message : String(heavyErr);
         logError("[quick→heavy] escalation also failed", heavyErr);
@@ -764,9 +766,9 @@ async function runHeartbeat(
 
   // Clean up stale pending exchanges (older than 10 minutes)
   const staleThreshold = Date.now() - 10 * 60_000;
-  for (const [phone, pending] of pendingExchanges) {
+  for (const [pendingPhone, pending] of pendingExchanges) {
     if (new Date(pending.timestamp).getTime() < staleThreshold) {
-      pendingExchanges.delete(phone);
+      pendingExchanges.delete(pendingPhone);
     }
   }
 
@@ -791,7 +793,7 @@ async function runHeartbeat(
     const pruned = pruneStaleStates();
     if (pruned > 0) log(`[heartbeat] pruned ${pruned} stale rotation states`);
 
-    const systemPrompt = await buildSystemPrompt("heartbeat", name);
+    const systemPrompt = await buildSystemPrompt("june", name);
     const sessionId = await getSessionId(phone, "general");
 
     const prompt = `HEARTBEAT: Check HEARTBEAT.md and follow it. Current time: ${now.toISOString()}. Reply HEARTBEAT_OK if nothing needs attention, otherwise take action.`;
@@ -1089,8 +1091,8 @@ export async function startDaemon(): Promise<void> {
 
           log(`[incoming] [${chConfig.name}] ${msg.sender}: ${msg.text.slice(0, 80)}...`);
 
-          // User message → override quiet hours for 1 hour
-          quietHoursOverrideUntil = Date.now() + 60 * 60 * 1000;
+          // User message → override quiet hours for 1 hour (per-channel)
+          quietHoursOverrideUntil.set(chConfig.phone, Date.now() + 60 * 60 * 1000);
 
           // Restricted channels always route to "general"
           let taskType: TaskType;
