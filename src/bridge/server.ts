@@ -63,16 +63,21 @@ async function readBody(req: IncomingMessage): Promise<Record<string, unknown>> 
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let size = 0;
+    let aborted = false;
     req.on("data", (c: Buffer) => {
+      if (aborted) return;
       size += c.length;
       if (size > MAX_BODY_SIZE) {
+        aborted = true;
         reject(new BodyTooLargeError());
-        req.destroy();
+        // Don't destroy the socket here — the route handler still needs to
+        // write a 413 response. Subsequent data chunks are ignored.
         return;
       }
       chunks.push(c);
     });
     req.on("end", () => {
+      if (aborted) return;
       try {
         const raw = Buffer.concat(chunks).toString("utf-8");
         resolve(raw ? JSON.parse(raw) : {});
@@ -80,7 +85,10 @@ async function readBody(req: IncomingMessage): Promise<Record<string, unknown>> 
         reject(new BodyParseError(err instanceof Error ? err.message : String(err)));
       }
     });
-    req.on("error", reject);
+    req.on("error", (err) => {
+      if (aborted) return;
+      reject(err);
+    });
   });
 }
 
