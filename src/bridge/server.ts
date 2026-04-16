@@ -9,6 +9,8 @@
  * - All routes wrapped in try/catch. Bridge crashes do NOT affect daemon.
  * - Write operations are opt-in via BRIDGE_ALLOW_WRITE env var.
  * - No authentication currently (localhost-only trust model).
+ * - No CORS: loopback clients don't need it, and a wildcard origin would
+ *   expose the bridge to any web page the user visits.
  */
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { URL } from "node:url";
@@ -16,6 +18,21 @@ import { URL } from "node:url";
 const BRIDGE_PORT = Number(process.env.JUNECLAW_BRIDGE_PORT) || 3200;
 const BRIDGE_HOST = "127.0.0.1";
 const ALLOW_WRITE = process.env.JUNECLAW_BRIDGE_ALLOW_WRITE === "1";
+const MAX_BODY_SIZE = 1_000_000; // 1 MB
+
+class BodyTooLargeError extends Error {
+  constructor() {
+    super("Request body exceeds 1MB limit");
+    this.name = "BodyTooLargeError";
+  }
+}
+
+class BodyParseError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "BodyParseError";
+  }
+}
 
 type Handler = (req: IncomingMessage, res: ServerResponse, url: URL) => Promise<void> | void;
 
@@ -32,26 +49,48 @@ let context: BridgeContext = {};
 function json(res: ServerResponse, status: number, body: unknown) {
   res.statusCode = status;
   res.setHeader("Content-Type", "application/json");
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   res.end(JSON.stringify(body));
 }
 
 async function readBody(req: IncomingMessage): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
-    req.on("data", (c) => chunks.push(c));
+    let size = 0;
+    req.on("data", (c: Buffer) => {
+      size += c.length;
+      if (size > MAX_BODY_SIZE) {
+        reject(new BodyTooLargeError());
+        req.destroy();
+        return;
+      }
+      chunks.push(c);
+    });
     req.on("end", () => {
       try {
         const raw = Buffer.concat(chunks).toString("utf-8");
         resolve(raw ? JSON.parse(raw) : {});
       } catch (err) {
-        reject(err);
+        reject(new BodyParseError(err instanceof Error ? err.message : String(err)));
       }
     });
     req.on("error", reject);
   });
+}
+
+/**
+ * Map readBody() errors to appropriate HTTP responses.
+ * Returns true if the error was handled (response sent), false otherwise.
+ */
+function handleBodyError(res: ServerResponse, err: unknown): boolean {
+  if (err instanceof BodyTooLargeError) {
+    json(res, 413, { error: err.message });
+    return true;
+  }
+  if (err instanceof BodyParseError) {
+    json(res, 400, { error: `Invalid JSON: ${err.message}` });
+    return true;
+  }
+  return false;
 }
 
 // ─── Routes ─────────────────────────────────────────────
@@ -68,8 +107,15 @@ routes.set("POST /bridge/message", async (req, res) => {
   if (!ALLOW_WRITE) return json(res, 403, { error: "Write operations disabled. Set JUNECLAW_BRIDGE_ALLOW_WRITE=1" });
   if (!context.sendMessage) return json(res, 503, { error: "sendMessage not wired" });
 
+  let body: Record<string, unknown>;
   try {
-    const body = await readBody(req);
+    body = await readBody(req);
+  } catch (err) {
+    if (handleBodyError(res, err)) return;
+    return json(res, 500, { error: err instanceof Error ? err.message : String(err) });
+  }
+
+  try {
     const channel = body.channel as string;
     const text = body.text as string;
     if (!channel || !text) return json(res, 400, { error: "Missing channel or text" });
@@ -85,8 +131,15 @@ routes.set("POST /bridge/send-to-phone", async (req, res) => {
   if (!ALLOW_WRITE) return json(res, 403, { error: "Write operations disabled" });
   if (!context.sendToPhone) return json(res, 503, { error: "sendToPhone not wired" });
 
+  let body: Record<string, unknown>;
   try {
-    const body = await readBody(req);
+    body = await readBody(req);
+  } catch (err) {
+    if (handleBodyError(res, err)) return;
+    return json(res, 500, { error: err instanceof Error ? err.message : String(err) });
+  }
+
+  try {
     const phone = body.phone as string;
     const text = body.text as string;
     if (!phone || !text) return json(res, 400, { error: "Missing phone or text" });
@@ -102,8 +155,15 @@ routes.set("POST /bridge/enqueue", async (req, res) => {
   if (!ALLOW_WRITE) return json(res, 403, { error: "Write operations disabled" });
   if (!context.enqueueMessage) return json(res, 503, { error: "enqueueMessage not wired" });
 
+  let body: Record<string, unknown>;
   try {
-    const body = await readBody(req);
+    body = await readBody(req);
+  } catch (err) {
+    if (handleBodyError(res, err)) return;
+    return json(res, 500, { error: err instanceof Error ? err.message : String(err) });
+  }
+
+  try {
     const channel = body.channel as string;
     const text = body.text as string;
     const taskType = body.taskType as string | undefined;
@@ -121,16 +181,6 @@ export function startBridge(ctx: BridgeContext = {}) {
   context = ctx;
 
   const server = createServer(async (req, res) => {
-    // CORS preflight
-    if (req.method === "OPTIONS") {
-      res.statusCode = 204;
-      res.setHeader("Access-Control-Allow-Origin", "*");
-      res.setHeader("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS");
-      res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-      res.end();
-      return;
-    }
-
     try {
       const url = new URL(req.url ?? "/", `http://${BRIDGE_HOST}:${BRIDGE_PORT}`);
       const key = `${req.method} ${url.pathname}`;
