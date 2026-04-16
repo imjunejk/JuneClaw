@@ -43,8 +43,10 @@ export interface BridgeContext {
  * Validate Hustle-related env config and log a clear warning for each gap.
  * All failures are non-fatal: the bridge still runs (read-only at minimum);
  * only SCHEDULE forwarding is degraded.
+ *
+ * Exported for testability.
  */
-function validateHustleConfig(): void {
+export function validateHustleConfig(): void {
   const url = process.env.HUSTLE_URL || "http://127.0.0.1:3100";
   const teamId = process.env.HUSTLE_DEFAULT_TEAM_ID;
   const key = process.env.HUSTLE_INTERNAL_KEY;
