@@ -34,6 +34,13 @@ class BodyParseError extends Error {
   }
 }
 
+// Defense in depth: if someone later refactors BRIDGE_HOST to read from an
+// env var, fail loudly rather than silently bind to 0.0.0.0.
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1", "localhost"]);
+if (!LOOPBACK_HOSTS.has(BRIDGE_HOST)) {
+  throw new Error(`Bridge refuses non-loopback host: ${BRIDGE_HOST}`);
+}
+
 type Handler = (req: IncomingMessage, res: ServerResponse, url: URL) => Promise<void> | void;
 
 interface BridgeContext {
