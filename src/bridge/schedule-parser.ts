@@ -48,51 +48,89 @@ export function stripScheduleBlocks(text: string): string {
   return text.replace(SCHEDULE_BLOCK, "").replace(/\n{3,}/g, "\n\n").trim();
 }
 
+const FETCH_TIMEOUT_MS = 5_000;
+
+export interface ForwardResult {
+  ok: number;
+  failed: number;
+  failures: Array<{ phone: string; fireAt: string; reason: string }>;
+}
+
 /**
- * POST scheduled reminders to Hustle API. Silent on failure.
+ * POST scheduled reminders to Hustle API.
+ *
+ * Non-fatal: returns a structured result instead of throwing. Callers can
+ * surface failures to the user — the prior silent-warn-only behavior
+ * masked missed reminders.
  */
 export async function forwardSchedules(
   blocks: ScheduleBlock[],
   opts: { sourcePhone?: string; agentTaskType?: string } = {},
-): Promise<{ ok: number; failed: number }> {
-  if (blocks.length === 0) return { ok: 0, failed: 0 };
+): Promise<ForwardResult> {
+  const result: ForwardResult = { ok: 0, failed: 0, failures: [] };
+  if (blocks.length === 0) return result;
   if (!HUSTLE_TEAM_ID) {
     console.warn("[schedule] HUSTLE_DEFAULT_TEAM_ID not set — cannot persist reminders");
-    return { ok: 0, failed: blocks.length };
+    result.failed = blocks.length;
+    for (const b of blocks) {
+      result.failures.push({ phone: b.phone, fireAt: b.fireAt, reason: "HUSTLE_DEFAULT_TEAM_ID not configured" });
+    }
+    return result;
   }
 
-  let ok = 0;
-  let failed = 0;
-
   for (const block of blocks) {
-    try {
-      const headers: Record<string, string> = { "Content-Type": "application/json" };
-      if (HUSTLE_INTERNAL_KEY) headers["X-Internal-Key"] = HUSTLE_INTERNAL_KEY;
-
-      const res = await fetch(`${HUSTLE_URL}/api/internal/reminders`, {
-        method: "POST",
-        headers,
-        body: JSON.stringify({
-          teamId: HUSTLE_TEAM_ID,
-          phone: block.phone,
-          message: block.message,
-          fireAt: block.fireAt,
-          source: "agent",
-        }),
-      });
-      if (res.ok) {
-        ok++;
-        console.log(`[schedule] ✓ queued reminder to ${block.phone} at ${block.fireAt}`);
-      } else {
-        failed++;
-        const body = await res.text().catch(() => "");
-        console.warn(`[schedule] ✗ Hustle rejected: ${res.status} ${body.slice(0, 120)}`);
-      }
-    } catch (err) {
-      failed++;
-      console.warn(`[schedule] ✗ forward failed: ${err instanceof Error ? err.message : err}`);
+    const reason = await postReminder(block);
+    if (reason === null) {
+      result.ok++;
+      console.log(`[schedule] ✓ queued reminder to ${maskPhone(block.phone)} at ${block.fireAt}`);
+    } else {
+      result.failed++;
+      result.failures.push({ phone: block.phone, fireAt: block.fireAt, reason });
+      console.warn(`[schedule] ✗ ${maskPhone(block.phone)} @ ${block.fireAt}: ${reason}`);
     }
   }
 
-  return { ok, failed };
+  if (result.failed > 0) {
+    console.warn(`[schedule] forwardSchedules summary: ${result.ok} queued, ${result.failed} FAILED (see above)`);
+  }
+
+  return result;
+}
+
+async function postReminder(block: ScheduleBlock): Promise<string | null> {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (HUSTLE_INTERNAL_KEY) headers["X-Internal-Key"] = HUSTLE_INTERNAL_KEY;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+
+  try {
+    const res = await fetch(`${HUSTLE_URL}/api/internal/reminders`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        teamId: HUSTLE_TEAM_ID,
+        phone: block.phone,
+        message: block.message,
+        fireAt: block.fireAt,
+        source: "agent",
+      }),
+      signal: controller.signal,
+    });
+    if (res.ok) return null;
+    const body = await res.text().catch(() => "");
+    return `HTTP ${res.status} ${body.slice(0, 120)}`;
+  } catch (err) {
+    if (err instanceof Error && err.name === "AbortError") {
+      return `timeout after ${FETCH_TIMEOUT_MS}ms`;
+    }
+    return err instanceof Error ? err.message : String(err);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function maskPhone(phone: string): string {
+  if (phone.length <= 8) return "***";
+  return `${phone.slice(0, 4)}***${phone.slice(-4)}`;
 }
