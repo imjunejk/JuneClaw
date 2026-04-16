@@ -12,7 +12,9 @@ export interface ScheduleBlock {
   message: string;
 }
 
-const SCHEDULE_BLOCK = /\[\[SCHEDULE\s*\n([\s\S]*?)\n\]\]/g;
+// Tolerant of trailing whitespace before `]]` and optional preceding newline,
+// since agents occasionally emit `...message: foo]]` on one line or trail spaces.
+const SCHEDULE_BLOCK = /\[\[SCHEDULE\s*\n([\s\S]*?)\s*\]\]/g;
 
 export function parseScheduleBlocks(text: string): ScheduleBlock[] {
   const blocks: ScheduleBlock[] = [];
