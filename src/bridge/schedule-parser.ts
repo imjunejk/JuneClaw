@@ -14,6 +14,36 @@ export interface ScheduleBlock {
 
 const SCHEDULE_BLOCK = /\[\[SCHEDULE\s*\n([\s\S]*?)\n\]\]/g;
 
+// E.164-style: optional +, then 7–15 digits (recommendation max is 15)
+const PHONE_RE = /^\+?\d{7,15}$/;
+
+// Hustle's Twilio pipeline truncates long SMS; cap to keep messages sane.
+const MAX_MESSAGE_LEN = 1_000;
+
+function validateBlock(fields: Record<string, string>): { block: ScheduleBlock | null; reason?: string } {
+  if (!fields.phone) return { block: null, reason: "missing 'phone'" };
+  if (!fields.at) return { block: null, reason: "missing 'at'" };
+  if (!fields.message) return { block: null, reason: "missing 'message'" };
+
+  const phone = fields.phone.replace(/[\s\-()]/g, "");
+  if (!PHONE_RE.test(phone)) {
+    return { block: null, reason: `invalid phone format: ${fields.phone.slice(0, 20)}` };
+  }
+
+  const parsed = Date.parse(fields.at);
+  if (Number.isNaN(parsed)) {
+    return { block: null, reason: `invalid ISO-8601 'at': ${fields.at.slice(0, 40)}` };
+  }
+  // Normalize to canonical ISO form Hustle expects
+  const fireAt = new Date(parsed).toISOString();
+
+  if (fields.message.length > MAX_MESSAGE_LEN) {
+    return { block: null, reason: `message exceeds ${MAX_MESSAGE_LEN} chars (got ${fields.message.length})` };
+  }
+
+  return { block: { phone, fireAt, message: fields.message } };
+}
+
 export function parseScheduleBlocks(text: string): ScheduleBlock[] {
   const blocks: ScheduleBlock[] = [];
   for (const match of text.matchAll(SCHEDULE_BLOCK)) {
@@ -34,8 +64,11 @@ export function parseScheduleBlocks(text: string): ScheduleBlock[] {
     }
     if (currentKey) fields[currentKey] = currentValue.join("\n").trim();
 
-    if (fields.phone && fields.at && fields.message) {
-      blocks.push({ phone: fields.phone, fireAt: fields.at, message: fields.message });
+    const { block, reason } = validateBlock(fields);
+    if (block) {
+      blocks.push(block);
+    } else {
+      console.warn(`[schedule] rejected SCHEDULE block: ${reason}`);
     }
   }
   return blocks;
