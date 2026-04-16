@@ -1013,6 +1013,49 @@ export async function startDaemon(): Promise<void> {
 
   initCronScheduler(juneEntry.channel, juneEntry.config);
 
+  // ─── Hustle Bridge (optional HTTP control) ────────────
+  // Exposes daemon control to Hustle UI on localhost:3200.
+  // Failures are non-fatal — daemon continues normally.
+  import("./bridge/index.js").then((mod) =>
+    mod.initBridge({
+      sendMessage: async (name, text) => {
+        const entry = channelEntries.find(
+          (e) => e.config.name === name || e.key === name,
+        );
+        if (!entry) throw new Error(`Unknown channel: ${name}`);
+        await entry.channel.sendMessage(text);
+      },
+      sendToPhone: async (phone, text) => {
+        const { createIMessageChannel } = await import("./gateway/imessage.js");
+        const adhoc = createIMessageChannel(phone, 0);
+        await adhoc.sendMessage(text);
+      },
+      enqueueMessage: async (name, text, taskType) => {
+        const entry = channelEntries.find(
+          (e) => e.config.name === name || e.key === name,
+        );
+        if (!entry) throw new Error(`Unknown channel: ${name}`);
+        const queueId = `bridge-${Date.now()}`;
+        const validTypes = ["coding", "research", "general", "quick"] as const;
+        const tt = (validTypes as readonly string[]).includes(taskType ?? "") ? (taskType as typeof validTypes[number]) : "general";
+        return await messageQueue.enqueue({
+          text,
+          taskType: tt,
+          phone: entry.config.phone,
+          enqueuedAt: Date.now(),
+        }, queueId);
+      },
+      getChannels: () => channelEntries.map((e) => ({
+        name: e.config.name,
+        phone: e.config.phone,
+        chatId: e.config.chatId,
+        accessLevel: e.config.accessLevel ?? "full",
+      })),
+    }).then(() => log("[bridge] started on http://127.0.0.1:3200")),
+  ).catch((err) => {
+    log(`[bridge] failed to start (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
+  });
+
   // Clean stale progress state from previous run
   await clearProgressState();
 
