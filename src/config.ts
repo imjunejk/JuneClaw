@@ -115,22 +115,27 @@ export const config = {
     /** Strategy files injected per task type. Files not found are silently skipped. */
     strategyMapping: {
       coding: [
+        { file: "reminder-protocol.md", label: "REMINDER PROTOCOL", maxChars: 1500 },
         { file: "dev-team-common.md", label: "DEV-TEAM (Common)", maxChars: 5000 },
         { file: "dev-team-process.md", label: "DEV-TEAM (Process)", maxChars: 5000 },
         { file: "dev-team-youngsik.md", label: "DEV-TEAM (Youngsik — FE)", maxChars: 3000 },
         { file: "dev-team-youngchul.md", label: "DEV-TEAM (Youngchul — BE)", maxChars: 3000 },
       ],
       research: [
+        { file: "reminder-protocol.md", label: "REMINDER PROTOCOL", maxChars: 1500 },
         { file: "dev-team-common.md", label: "DEV-TEAM (Common)", maxChars: 5000 },
         { file: "dev-team-kwangsoo.md", label: "DEV-TEAM (Kwangsoo — Strategy)", maxChars: 3000 },
         { file: "dev-team-sangchul.md", label: "DEV-TEAM (Sangchul — Marketing)", maxChars: 3000 },
       ],
       general: [
+        { file: "reminder-protocol.md", label: "REMINDER PROTOCOL", maxChars: 1500 },
         { file: "dev-team-youngsu.md", label: "DEV-TEAM (Youngsu — PM)", maxChars: 8000 },
         { file: "dev-team-common.md", label: "DEV-TEAM (Common)", maxChars: 5000 },
         { file: "dev-team-process.md", label: "DEV-TEAM (Process)", maxChars: 5000 },
       ],
-      quick: [],
+      quick: [
+        { file: "reminder-protocol.md", label: "REMINDER PROTOCOL", maxChars: 1500 },
+      ],
     } satisfies Record<TaskType, { file: string; label: string; maxChars: number }[]>,
   },
   contextRotation: {

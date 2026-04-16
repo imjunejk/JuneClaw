@@ -430,10 +430,21 @@ async function processQuickMessage(
   log(`[quick] responding to: ${text.slice(0, 60)}...`);
   try {
     const response = await quickRespond(text);
-    log(`[quick] response: ${response.slice(0, 80)}...`);
-    await channel.sendMessage(response);
-    await appendDailyLog(name, text, response);
-    recordExchange(text, response, "quick");
+
+    // Parse + forward SCHEDULE blocks
+    const { parseScheduleBlocks, stripScheduleBlocks, forwardSchedules } = await import("./bridge/schedule-parser.js");
+    const scheduleBlocks = parseScheduleBlocks(response);
+    const responseForUser = scheduleBlocks.length > 0 ? stripScheduleBlocks(response) : response;
+    if (scheduleBlocks.length > 0) {
+      log(`[schedule] detected ${scheduleBlocks.length} SCHEDULE block(s) from quick agent`);
+      forwardSchedules(scheduleBlocks, { sourcePhone: phone, agentTaskType: "quick" })
+        .catch((err) => log(`[schedule] forward error: ${err instanceof Error ? err.message : err}`));
+    }
+
+    log(`[quick] response: ${responseForUser.slice(0, 80)}...`);
+    await channel.sendMessage(responseForUser);
+    await appendDailyLog(name, text, responseForUser);
+    recordExchange(text, responseForUser, "quick");
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
     logError("[quick] failed", err);
@@ -592,13 +603,24 @@ async function processMessage(
       };
     }
 
-    log(`[response] (${taskType}) ${result.response.slice(0, 80)}...`);
-    await channel.sendMessage(result.response);
-    await appendDailyLog(name, text, result.response);
+    // Parse + strip SCHEDULE blocks, forward to Hustle for persistence
+    const { parseScheduleBlocks, stripScheduleBlocks, forwardSchedules } = await import("./bridge/schedule-parser.js");
+    const scheduleBlocks = parseScheduleBlocks(result.response);
+    const responseForUser = scheduleBlocks.length > 0 ? stripScheduleBlocks(result.response) : result.response;
+    if (scheduleBlocks.length > 0) {
+      log(`[schedule] detected ${scheduleBlocks.length} SCHEDULE block(s) from agent`);
+      forwardSchedules(scheduleBlocks, { sourcePhone: phone, agentTaskType: taskType })
+        .then(({ ok, failed }) => log(`[schedule] forwarded ${ok} ok, ${failed} failed`))
+        .catch((err) => log(`[schedule] forward error: ${err instanceof Error ? err.message : err}`));
+    }
+
+    log(`[response] (${taskType}) ${responseForUser.slice(0, 80)}...`);
+    await channel.sendMessage(responseForUser);
+    await appendDailyLog(name, text, responseForUser);
     await emit("message:responded", { to: name });
 
     // Record exchange for cross-session context bridge
-    recordExchange(text, result.response, taskType);
+    recordExchange(text, responseForUser, taskType);
 
     // Store exchange for quality scoring on next user message
     const stratHash = await currentStrategyHash(taskType);
