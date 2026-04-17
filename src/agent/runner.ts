@@ -14,7 +14,7 @@ import {
 // ---------------------------------------------------------------------------
 const modelBreakers = new Map<string, CircuitBreaker>();
 
-const FALLBACK_MODEL = "claude-sonnet-4-6";
+const FALLBACK_MODEL = "claude-sonnet-4-7";
 
 function breakerFor(model: string): CircuitBreaker {
   let cb = modelBreakers.get(model);
