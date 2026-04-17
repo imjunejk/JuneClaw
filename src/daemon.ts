@@ -431,14 +431,12 @@ async function processQuickMessage(
   try {
     const response = await quickRespond(text);
 
-    // Parse + forward SCHEDULE blocks
-    const { parseScheduleBlocks, stripScheduleBlocks, forwardSchedules } = await import("./bridge/schedule-parser.js");
+    // Strip SCHEDULE blocks (forwarding disabled — CronCreate is the sole scheduler)
+    const { parseScheduleBlocks, stripScheduleBlocks } = await import("./bridge/schedule-parser.js");
     const scheduleBlocks = parseScheduleBlocks(response);
     const responseForUser = scheduleBlocks.length > 0 ? stripScheduleBlocks(response) : response;
     if (scheduleBlocks.length > 0) {
-      log(`[schedule] detected ${scheduleBlocks.length} SCHEDULE block(s) from quick agent`);
-      forwardSchedules(scheduleBlocks, { sourcePhone: phone, agentTaskType: "quick" })
-        .catch((err) => log(`[schedule] forward error: ${err instanceof Error ? err.message : err}`));
+      log(`[schedule] stripped ${scheduleBlocks.length} SCHEDULE block(s) from quick agent (forwarding disabled)`);
     }
 
     log(`[quick] response: ${responseForUser.slice(0, 80)}...`);
@@ -603,15 +601,12 @@ async function processMessage(
       };
     }
 
-    // Parse + strip SCHEDULE blocks, forward to Hustle for persistence
-    const { parseScheduleBlocks, stripScheduleBlocks, forwardSchedules } = await import("./bridge/schedule-parser.js");
+    // Strip SCHEDULE blocks (forwarding disabled — CronCreate is the sole scheduler)
+    const { parseScheduleBlocks, stripScheduleBlocks } = await import("./bridge/schedule-parser.js");
     const scheduleBlocks = parseScheduleBlocks(result.response);
     const responseForUser = scheduleBlocks.length > 0 ? stripScheduleBlocks(result.response) : result.response;
     if (scheduleBlocks.length > 0) {
-      log(`[schedule] detected ${scheduleBlocks.length} SCHEDULE block(s) from agent`);
-      forwardSchedules(scheduleBlocks, { sourcePhone: phone, agentTaskType: taskType })
-        .then(({ ok, failed }) => log(`[schedule] forwarded ${ok} ok, ${failed} failed`))
-        .catch((err) => log(`[schedule] forward error: ${err instanceof Error ? err.message : err}`));
+      log(`[schedule] stripped ${scheduleBlocks.length} SCHEDULE block(s) from agent (forwarding disabled)`);
     }
 
     log(`[response] (${taskType}) ${responseForUser.slice(0, 80)}...`);
