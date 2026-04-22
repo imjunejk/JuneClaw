@@ -152,7 +152,8 @@ export const config = {
     maxSharedContextLines: 20,
   },
   costMonitor: {
-    dailyLimitUSD: 50,
+    // dailyLimitUSD <= 0 → 한도 없음 (enforce 안 함). 트래킹은 계속 돌아감.
+    dailyLimitUSD: 0,
     warningPercent: 80,
   },
   cron: {
