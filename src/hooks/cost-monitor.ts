@@ -37,15 +37,19 @@ export function getDailyCost(): DailyCost {
   return { ...current };
 }
 
-/** Check if the daily cost limit has been exceeded. */
+/** Check if the daily cost limit has been exceeded. dailyLimitUSD <= 0 이면 비활성화. */
 export function isOverLimit(): boolean {
   ensureCurrentDay();
-  return current.totalUSD >= config.costMonitor.dailyLimitUSD;
+  const limit = config.costMonitor.dailyLimitUSD;
+  if (limit <= 0) return false;
+  return current.totalUSD >= limit;
 }
 
-/** Check if we are at or above the warning threshold (default 80%). */
+/** Check if we are at or above the warning threshold (default 80%). dailyLimitUSD <= 0 이면 비활성화. */
 export function isNearLimit(): boolean {
   ensureCurrentDay();
-  const threshold = config.costMonitor.dailyLimitUSD * (config.costMonitor.warningPercent / 100);
+  const limit = config.costMonitor.dailyLimitUSD;
+  if (limit <= 0) return false;
+  const threshold = limit * (config.costMonitor.warningPercent / 100);
   return current.totalUSD >= threshold;
 }

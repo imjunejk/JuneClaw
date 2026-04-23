@@ -16,6 +16,19 @@ const execFileAsync = promisify(execFile);
 const ALGO_DIR = join(homedir(), "gwangsu", "algo");
 const TRADE_EXECUTOR = join(ALGO_DIR, "trade_executor.py");
 const ALGO_PYTHON = join(ALGO_DIR, ".venv", "bin", "python");
+const PORTFOLIO_MANAGER = join(ALGO_DIR, "strategies", "portfolio_manager.py");
+
+// SEPA preview/confirm natural-language triggers (case-insensitive exact match after trim).
+// Preview 알림에 이 문구들을 안내함 — 정확히 이 토큰들과 일치해야 실행.
+// "실행" 단독은 의도적으로 제외 (크론/스크립트 맥락에서 false-positive 가능) —
+// "실행해줘" / "execute" 같이 confirm 의도가 명확한 phrase 만 등록.
+const SEPA_CONFIRM_TRIGGERS = new Set([
+  "매매해", "매매해줘",
+  "execute", "실행해줘",
+]);
+const SEPA_REJECT_TRIGGERS = new Set([
+  "취소", "취소해줘", "cancel",
+]);
 
 export interface CommandResult {
   handled: boolean;
@@ -27,6 +40,22 @@ export async function handleCommand(
   phone: string,
 ): Promise<CommandResult> {
   const trimmed = text.trim().toLowerCase();
+
+  // Empty input → unhandled (기존 slash 체크도 빈 문자열 unhandled 처리).
+  if (!trimmed) {
+    return { handled: false };
+  }
+
+  // SEPA natural-language triggers (confirm/reject plan) — preview 알림 응답용.
+  // 슬래시 prefix 없이 정확히 trigger 토큰과 일치해야 발동 (conversational noise 방지).
+  // Slash 체크 전에 배치 — "/매매해" 같은 오타성 slash 입력은 trigger set 에 없으니
+  // 자연스럽게 slash 분기로 흘러 default unhandled.
+  if (SEPA_CONFIRM_TRIGGERS.has(trimmed)) {
+    return { handled: true, response: await sepaConfirmCommand() };
+  }
+  if (SEPA_REJECT_TRIGGERS.has(trimmed)) {
+    return { handled: true, response: await sepaRejectCommand() };
+  }
 
   if (!trimmed.startsWith("/")) {
     return { handled: false };
@@ -75,6 +104,12 @@ export async function handleCommand(
 
     case "/execute":
       return { handled: true, response: await executeCommand(args) };
+
+    case "/sepa-confirm":
+      return { handled: true, response: await sepaConfirmCommand() };
+
+    case "/sepa-reject":
+      return { handled: true, response: await sepaRejectCommand() };
 
     default:
       return { handled: false };
@@ -324,6 +359,82 @@ async function tradeCommand(args: string[]): Promise<string> {
     return `✅ ${result.action}`;
   }
   return `❌ 주문 실패: ${result.error}`;
+}
+
+// ── SEPA Preview/Confirm (manual override for plan-based auto cron) ──
+//
+// Flow:
+//   1. Cron (06:35/09:35/12:35/15:35) 가 portfolio_manager sepa-preview 실행
+//   2. iMessage 알림에 광7 diff + "매매해/취소" 안내
+//   3. User 회신 → 여기서 portfolio_manager sepa-confirm / sepa-reject 호출
+//   4. 결과는 portfolio_manager 내부 broadcast("portfolio") 로 별도 알림
+//
+// **Security**: daemon.ts 가 access.json 화이트리스트로 phone 를 이미 걸러냄 —
+// commands.ts 도달 시점엔 allowlisted user 가정. 재검증 없음.
+//
+// Fire-and-forget: sepa-confirm 은 run_vcp_check 내부에서 radar scan 최대 15분 가능.
+// ack 즉시 반환, 실매매 결과는 portfolio_manager.main 의 broadcast("portfolio") 로.
+
+// AGITQ_PAPER default: false (live trading). 테스트 환경에선 env 로 override.
+const AGITQ_PAPER_DEFAULT = process.env.AGITQ_PAPER ?? "false";
+
+
+async function sepaConfirmCommand(): Promise<string> {
+  // 백그라운드 실행 — Alpaca API + radar scan 시간 (typical 30-60s, max 15min).
+  // 결과는 portfolio_manager 의 broadcast("portfolio") 로 별도 수신.
+  //
+  // 실패 경로:
+  //   - run_vcp_confirm 내부 try/except 로 잡히는 예외 → status=failed + broadcast 로 알림
+  //   - Python crash (SIGKILL/import error): broadcast 못 함 — stderr 로그만 남음.
+  //     daemon 로그 tail 로 감지 가능 (drone 은 안 붙여둠).
+  try {
+    const child = execFile(
+      ALGO_PYTHON,
+      [PORTFOLIO_MANAGER, "--mode", "sepa-confirm"],
+      {
+        env: { ...process.env, PYTHONPATH: ALGO_DIR, AGITQ_PAPER: AGITQ_PAPER_DEFAULT },
+        timeout: 20 * 60 * 1000, // 20분 hard limit (radar 15min + 여유)
+      },
+      (err, _stdout, stderr) => {
+        if (err) {
+          const stamp = new Date().toISOString();
+          console.error(
+            `[sepa-confirm ${stamp}] exec failed (code=${err.code ?? "?"}): ${err.message}`,
+          );
+          if (stderr) {
+            console.error(`[sepa-confirm ${stamp}] stderr: ${stderr.slice(0, 1000)}`);
+          }
+          // Note: broadcast 로 user 알림은 portfolio_manager.main 이 담당.
+          // Python 레벨 crash 시 알림 누락 — daemon 로그로만 확인 가능.
+        }
+      },
+    );
+    // Parent 는 child 대기 안 함 — detach (daemon 재시작해도 child 계속 실행)
+    child.unref();
+    return "⏳ SEPA 리밸런싱 실행 시작 — 결과는 별도 알림 (보통 30-60초)";
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return `❌ 실행 실패: ${msg}`;
+  }
+}
+
+async function sepaRejectCommand(): Promise<string> {
+  // Reject 는 빠름 (plan.json 쓰기만) — 결과 즉시 받을 수 있음.
+  try {
+    const { stdout } = await execFileAsync(
+      ALGO_PYTHON,
+      [PORTFOLIO_MANAGER, "--mode", "sepa-reject"],
+      {
+        env: { ...process.env, PYTHONPATH: ALGO_DIR, AGITQ_PAPER: AGITQ_PAPER_DEFAULT },
+        timeout: 10_000,
+      },
+    );
+    const out = stdout.trim();
+    return out || "🛑 SEPA plan 취소됨 — 이 슬롯만 skip";
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return `❌ 취소 실패: ${msg}`;
+  }
 }
 
 async function executeCommand(args: string[]): Promise<string> {

@@ -46,17 +46,17 @@ export const config = {
     deferredTools: [] as string[],
     model: process.env.JUNECLAW_MODEL,
     modelRouting: {
-      coding: process.env.JUNECLAW_CODING_MODEL ?? "claude-opus-4-6",
-      research: process.env.JUNECLAW_RESEARCH_MODEL ?? "claude-opus-4-6",
-      general: process.env.JUNECLAW_GENERAL_MODEL ?? "claude-sonnet-4-6",
-      quick: process.env.JUNECLAW_QUICK_MODEL ?? "claude-sonnet-4-6",
-      classifier: process.env.JUNECLAW_CLASSIFIER_MODEL ?? "claude-sonnet-4-6",
+      coding: process.env.JUNECLAW_CODING_MODEL ?? "claude-opus-4-7",
+      research: process.env.JUNECLAW_RESEARCH_MODEL ?? "claude-opus-4-7",
+      general: process.env.JUNECLAW_GENERAL_MODEL ?? "claude-opus-4-7",
+      quick: process.env.JUNECLAW_QUICK_MODEL ?? "claude-opus-4-7",
+      classifier: process.env.JUNECLAW_CLASSIFIER_MODEL ?? "claude-opus-4-7",
     } satisfies Record<TaskType | "classifier", string>,
   },
   dream: {
     minHoursSinceLast: 24,
     minSessionsSinceLast: 5,
-    model: "claude-sonnet-4-6",
+    model: "claude-sonnet-4-7",
     timeoutMs: 120_000,
     hillClimbing: {
       enabled: true,
@@ -152,7 +152,8 @@ export const config = {
     maxSharedContextLines: 20,
   },
   costMonitor: {
-    dailyLimitUSD: 50,
+    // dailyLimitUSD <= 0 → 한도 없음 (enforce 안 함). 트래킹은 계속 돌아감.
+    dailyLimitUSD: 0,
     warningPercent: 80,
   },
   cron: {
