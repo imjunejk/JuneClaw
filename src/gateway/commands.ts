@@ -16,6 +16,17 @@ const execFileAsync = promisify(execFile);
 const ALGO_DIR = join(homedir(), "gwangsu", "algo");
 const TRADE_EXECUTOR = join(ALGO_DIR, "trade_executor.py");
 const ALGO_PYTHON = join(ALGO_DIR, ".venv", "bin", "python");
+const PORTFOLIO_MANAGER = join(ALGO_DIR, "strategies", "portfolio_manager.py");
+
+// SEPA preview/confirm natural-language triggers (case-insensitive exact match after trim).
+// Preview 알림에 이 문구들을 안내함 — 정확히 이 토큰들과 일치해야 실행.
+const SEPA_CONFIRM_TRIGGERS = new Set([
+  "매매해", "매매해줘",
+  "execute", "실행", "실행해줘",
+]);
+const SEPA_REJECT_TRIGGERS = new Set([
+  "취소", "취소해줘", "cancel",
+]);
 
 export interface CommandResult {
   handled: boolean;
@@ -27,6 +38,15 @@ export async function handleCommand(
   phone: string,
 ): Promise<CommandResult> {
   const trimmed = text.trim().toLowerCase();
+
+  // SEPA natural-language triggers (confirm/reject plan) — preview 알림 응답용.
+  // 슬래시 prefix 없이 정확히 trigger 토큰과 일치해야 발동 (conversational noise 방지).
+  if (SEPA_CONFIRM_TRIGGERS.has(trimmed)) {
+    return { handled: true, response: await sepaConfirmCommand() };
+  }
+  if (SEPA_REJECT_TRIGGERS.has(trimmed)) {
+    return { handled: true, response: await sepaRejectCommand() };
+  }
 
   if (!trimmed.startsWith("/")) {
     return { handled: false };
@@ -75,6 +95,12 @@ export async function handleCommand(
 
     case "/execute":
       return { handled: true, response: await executeCommand(args) };
+
+    case "/sepa-confirm":
+      return { handled: true, response: await sepaConfirmCommand() };
+
+    case "/sepa-reject":
+      return { handled: true, response: await sepaRejectCommand() };
 
     default:
       return { handled: false };
@@ -324,6 +350,63 @@ async function tradeCommand(args: string[]): Promise<string> {
     return `✅ ${result.action}`;
   }
   return `❌ 주문 실패: ${result.error}`;
+}
+
+// ── SEPA Preview/Confirm (manual override for plan-based auto cron) ──
+//
+// Flow:
+//   1. Cron (06:35/09:35/12:35/15:35) 가 portfolio_manager sepa-preview 실행
+//   2. iMessage 알림에 광7 diff + "매매해/취소" 안내
+//   3. User 회신 → 여기서 portfolio_manager sepa-confirm / sepa-reject 호출
+//   4. 결과는 portfolio_manager 내부 broadcast("portfolio") 로 별도 알림
+//
+// Fire-and-forget: sepa-confirm 은 run_vcp_check 내부에서 radar scan 최대 15분 가능.
+// ack 즉시 반환, 실매매 결과는 별도 iMessage 로.
+
+async function sepaConfirmCommand(): Promise<string> {
+  // 백그라운드 실행 — Alpaca API + radar scan 시간 (typical 30-60s, max 15min).
+  // 결과는 portfolio_manager 의 broadcast("portfolio") 로 별도 수신.
+  try {
+    const child = execFile(
+      ALGO_PYTHON,
+      [PORTFOLIO_MANAGER, "--mode", "sepa-confirm"],
+      {
+        env: { ...process.env, PYTHONPATH: ALGO_DIR, AGITQ_PAPER: "false" },
+        timeout: 20 * 60 * 1000, // 20분 hard limit (radar 15min + 여유)
+      },
+      (err, _stdout, stderr) => {
+        if (err) {
+          console.error(`[sepa-confirm] exec failed: ${err.message}`);
+          if (stderr) console.error(`[sepa-confirm] stderr: ${stderr.slice(0, 500)}`);
+        }
+      },
+    );
+    // Parent 는 child 대기 안 함 — detach
+    child.unref();
+    return "⏳ SEPA 리밸런싱 실행 시작 — 결과는 별도 알림 (보통 30-60초)";
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return `❌ 실행 실패: ${msg}`;
+  }
+}
+
+async function sepaRejectCommand(): Promise<string> {
+  // Reject 는 빠름 (plan.json 쓰기만) — 결과 즉시 받을 수 있음.
+  try {
+    const { stdout } = await execFileAsync(
+      ALGO_PYTHON,
+      [PORTFOLIO_MANAGER, "--mode", "sepa-reject"],
+      {
+        env: { ...process.env, PYTHONPATH: ALGO_DIR, AGITQ_PAPER: "false" },
+        timeout: 10_000,
+      },
+    );
+    const out = stdout.trim();
+    return out || "🛑 SEPA plan 취소됨 — 이 슬롯만 skip";
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return `❌ 취소 실패: ${msg}`;
+  }
 }
 
 async function executeCommand(args: string[]): Promise<string> {
