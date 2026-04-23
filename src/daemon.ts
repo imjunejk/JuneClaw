@@ -2,6 +2,7 @@ import { writeFile, readFile, readdir, unlink, mkdir, rename } from "node:fs/pro
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { promisify } from "node:util";
 import { dirname, join } from "node:path";
+import { homedir } from "node:os";
 
 const execFileAsync = promisify(execFile);
 import { config, getChannelKey, resolveChannelConfig, type ChannelConfig, type ChannelKey, type TaskType } from "./config.js";
@@ -933,6 +934,37 @@ function initCronScheduler(channel: Channel, channelConfig: ChannelConfig): void
       logError("[cron] failure classification failed", err);
       await logFromError(err, "cron:failureClassification");
       await emit("cron:failed", { job: "failureClassification", error: String(err) });
+    }
+  });
+
+  // 광수 어드바이스 — 3시간마다 Claude Opus 로 요약 생성 → 대시보드 업데이트.
+  // System crontab 에서 이전됨 (cron 환경에서 Claude CLI 가 macOS Keychain
+  // credentials 접근 못 하는 문제). JuneClaw daemon 은 user session 에서
+  // 돌아 Keychain 접근 OK — python subprocess 가 Claude CLI 호출 시 정상 작동.
+  addJob("gwangsuAdvice", config.cron.schedules.gwangsuAdvice!, async () => {
+    log("[cron] running gwangsu_advice...");
+    await emit("cron:started", { job: "gwangsuAdvice" });
+    try {
+      const algoDir = join(homedir(), "gwangsu", "algo");
+      const pythonBin = join(algoDir, ".venv", "bin", "python3");
+      const scriptPath = join(algoDir, "gwangsu_advice.py");
+      const envFile = join(algoDir, ".env");
+      // bash -c 로 .env 소싱 (python 이 FMP_API_KEY 등 접근 필요)
+      const cmd = `set -a && source "${envFile}" && set +a && `
+        + `PATH="${homedir()}/.local/bin:$PATH" `
+        + `"${pythonBin}" "${scriptPath}"`;
+      const { stdout, stderr } = await execFileAsync("bash", ["-c", cmd], {
+        env: { ...process.env, PYTHONPATH: algoDir },
+        timeout: 5 * 60_000, // 5분 — claude CLI timeout 240s + 여유
+      });
+      const tail = stdout.trim().split("\n").slice(-3).join(" | ");
+      log(`[cron] gwangsu_advice completed: ${tail}`);
+      if (stderr) log(`[cron] gwangsu_advice stderr: ${stderr.slice(0, 300)}`);
+      await emit("cron:completed", { job: "gwangsuAdvice" });
+    } catch (err) {
+      logError("[cron] gwangsu_advice failed", err);
+      await logFromError(err, "cron:gwangsuAdvice");
+      await emit("cron:failed", { job: "gwangsuAdvice", error: String(err) });
     }
   });
 
