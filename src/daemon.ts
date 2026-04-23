@@ -1,4 +1,5 @@
 import { writeFile, readFile, readdir, unlink, mkdir, rename } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { promisify } from "node:util";
 import { dirname, join } from "node:path";
@@ -937,29 +938,67 @@ function initCronScheduler(channel: Channel, channelConfig: ChannelConfig): void
     }
   });
 
-  // 광수 어드바이스 — 3시간마다 Claude Opus 로 요약 생성 → 대시보드 업데이트.
+  // 광수 어드바이스 — 3시간마다 Claude Opus 로 요약 생성 + 대시보드 자동 배포.
   // System crontab 에서 이전됨 (cron 환경에서 Claude CLI 가 macOS Keychain
   // credentials 접근 못 하는 문제). JuneClaw daemon 은 user session 에서
   // 돌아 Keychain 접근 OK — python subprocess 가 Claude CLI 호출 시 정상 작동.
+  // 생성 후 deploy.sh 자동 실행 → galleon.market 즉시 반영.
   addJob("gwangsuAdvice", config.cron.schedules.gwangsuAdvice!, async () => {
     log("[cron] running gwangsu_advice...");
     await emit("cron:started", { job: "gwangsuAdvice" });
     try {
       const algoDir = join(homedir(), "gwangsu", "algo");
+      const dashDir = join(homedir(), "gwangsu-dash");
       const pythonBin = join(algoDir, ".venv", "bin", "python3");
       const scriptPath = join(algoDir, "gwangsu_advice.py");
       const envFile = join(algoDir, ".env");
-      // bash -c 로 .env 소싱 (python 이 FMP_API_KEY 등 접근 필요)
-      const cmd = `set -a && source "${envFile}" && set +a && `
+      const deployScript = join(dashDir, "deploy.sh");
+
+      // 1. Advice 생성 (python + claude CLI)
+      const adviceCmd = `set -a && source "${envFile}" && set +a && `
         + `PATH="${homedir()}/.local/bin:$PATH" `
         + `"${pythonBin}" "${scriptPath}"`;
-      const { stdout, stderr } = await execFileAsync("bash", ["-c", cmd], {
+      const { stdout, stderr } = await execFileAsync("bash", ["-c", adviceCmd], {
         env: { ...process.env, PYTHONPATH: algoDir },
         timeout: 5 * 60_000, // 5분 — claude CLI timeout 240s + 여유
       });
       const tail = stdout.trim().split("\n").slice(-3).join(" | ");
       log(`[cron] gwangsu_advice completed: ${tail}`);
       if (stderr) log(`[cron] gwangsu_advice stderr: ${stderr.slice(0, 300)}`);
+
+      // 2. Dashboard 자동 배포 (CF Pages 에 새 JSON 반영)
+      //
+      // **Side effect (의도됨)**: deploy.sh 내부의 export_data.py 가
+      // advice JSON 뿐 아니라 dashboard 전체 데이터 (momentum/positions/trades
+      // 등) 를 재생성. 즉 3시간 cron 이 dashboard 전체 데이터 갱신도 담당.
+      // 다른 cron 과 timing overlap 은 15분+ gap 으로 회피됨 (06:15 sepa-scan 등).
+      //
+      // **Failure notification**: deploy.sh 자체가 실패 시 `imsg send` 로 June 에게
+      // iMessage 알림. 여기선 daemon 로그만 남김 (jc logs 로 조회 가능).
+      if (!existsSync(deployScript)) {
+        log(`[cron] deploy skipped — ${deployScript} not found (dashDir missing)`);
+      } else {
+        try {
+          log("[cron] deploying dashboard...");
+          const { stdout: deployOut, stderr: deployErr } = await execFileAsync(
+            "bash", [deployScript],
+            {
+              cwd: dashDir,
+              env: { ...process.env, PATH: `${homedir()}/.local/bin:${process.env.PATH}` },
+              timeout: 10 * 60_000, // 10분 — wrangler + export_data + cache purge 여유
+            },
+          );
+          const deployTail = deployOut.trim().split("\n").slice(-3).join(" | ");
+          log(`[cron] dashboard deployed: ${deployTail}`);
+          if (deployErr) log(`[cron] deploy stderr: ${deployErr.slice(0, 300)}`);
+        } catch (deployErr) {
+          // 배포 실패는 advice 생성 성공을 덮지 않음 — advice JSON 은 로컬에 저장됨.
+          // 다음 3시간 cron 에서 재시도 (deploy.sh 의 해시 캐시로 재업로드 비용 낮음).
+          // User 알림은 deploy.sh 의 imsg 로 처리됨 (위 주석 참조).
+          logError("[cron] dashboard deploy failed (advice still generated)", deployErr);
+        }
+      }
+
       await emit("cron:completed", { job: "gwangsuAdvice" });
     } catch (err) {
       logError("[cron] gwangsu_advice failed", err);
