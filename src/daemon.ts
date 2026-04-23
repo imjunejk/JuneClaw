@@ -973,7 +973,7 @@ function initCronScheduler(channel: Channel, channelConfig: ChannelConfig): void
       // 등) 를 재생성. 즉 3시간 cron 이 dashboard 전체 데이터 갱신도 담당.
       // 다른 cron 과 timing overlap 은 15분+ gap 으로 회피됨 (06:15 sepa-scan 등).
       //
-      // **Failure notification**: deploy.sh 자체가 실패 시 `imsg send` 로 Jun 에게
+      // **Failure notification**: deploy.sh 자체가 실패 시 `imsg send` 로 June 에게
       // iMessage 알림. 여기선 daemon 로그만 남김 (jc logs 로 조회 가능).
       if (!existsSync(deployScript)) {
         log(`[cron] deploy skipped — ${deployScript} not found (dashDir missing)`);
