@@ -133,6 +133,10 @@ const taskPriority: Record<TaskType, number> = { coding: 0, research: 1, general
 
 // Track which phones have an active heavy worker to prevent session conflicts
 const activePhones = new Set<string>();
+// Subset of activePhones reserved by runHeartbeat — used only for richer
+// drain-deferral logs so we can distinguish "held by worker" vs "held by
+// heartbeat" without changing gate semantics.
+const heartbeatActivePhones = new Set<string>();
 
 const workerPool = new WorkerPool({
   maxWorkers: 2,
@@ -804,6 +808,7 @@ async function runHeartbeat(
     // released, even if a non-awaited synchronous step between here and the
     // inner try block were to throw.
     activePhones.add(phone);
+    heartbeatActivePhones.add(phone);
     try {
       log("[heartbeat] running...");
 
@@ -866,6 +871,7 @@ async function runHeartbeat(
         await emit("heartbeat:failed", { error: String(err) });
       }
     } finally {
+      heartbeatActivePhones.delete(phone);
       activePhones.delete(phone);
     }
   }
@@ -1328,7 +1334,8 @@ export async function startDaemon(): Promise<void> {
 
         // Per-phone serialization: skip if this phone already has an active worker
         if (activePhones.has(phone)) {
-          log(`[pool] deferring ${task.id} — phone ${phone} busy (worker or heartbeat)`);
+          const holder = heartbeatActivePhones.has(phone) ? "heartbeat" : "worker";
+          log(`[pool] deferring ${task.id} — phone ${phone} busy (${holder} active)`);
           await messageQueue.release(task.id);
           break;
         }
