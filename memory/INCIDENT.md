@@ -38,19 +38,45 @@ processes both handling iMessages). R-E08 covers process-level duplication at st
 this incident shows the equivalent class within the daemon itself: HEARTBEAT firing
 mid-job spawns a parallel processor on the same session.
 
-## Proposed fix (not yet implemented)
-In `src/daemon.ts` HEARTBEAT handler (line ~785):
+## Fix (implemented — JuneClaw PR #57)
+In `src/daemon.ts` `runHeartbeat`, gate against the in-memory `activePhones`
+`Set<string>` that the worker-pool drain already uses for per-phone
+serialization (line 134). This reuses existing state rather than reading
+`progress-state.json` on disk — the drain and the heartbeat both mutate the
+Set synchronously inside the daemon's event loop, so `Set.has` is race-free
+without extra file I/O.
+
 ```ts
-// Before invoking runClaude, check if a general worker is active.
-try {
-  const state = JSON.parse(await readFile(config.progress.statePath, "utf8"));
-  const age = Date.now() - state.startedAt;
-  if (state.taskType === "general" && age < 5 * 60_000) {
-    log("[heartbeat] skipping — general worker active");
-    return;
+// src/heartbeat-gate.ts
+export function evaluateHeartbeat(
+  phone: string,
+  activeWorkers: ReadonlySet<string>,
+): HeartbeatDecision {
+  if (activeWorkers.has(phone)) {
+    return { action: "skip", reason: "worker active for this phone" };
   }
-} catch { /* no active worker */ }
+  return { action: "run" };
+}
+
+// src/daemon.ts runHeartbeat — gate the claude invocation, not autoDream
+const decision = evaluateHeartbeat(phone, activePhones);
+if (decision.action === "skip") {
+  log(`[heartbeat] skipping claude invocation — ${decision.reason}`);
+} else {
+  activePhones.add(phone);
+  try { /* heartbeat body */ } finally { activePhones.delete(phone); }
+}
+// autoDream runs unconditionally below
 ```
+
+Two additional hardenings in PR #57:
+1. **Stateless HEARTBEAT** — removed `getSessionId/setSessionId` for the
+   heartbeat invocation. Even with the gate, session-level reuse meant a
+   future cron could replay unanswered history; stateless makes that
+   impossible by construction.
+2. **Symmetric `try/finally`** — `activePhones.add` is wrapped in a
+   `try/finally` around the full body, matching the worker-pool drain at
+   `daemon.ts:1335/1358`. Either side sees the other as busy via `has()`.
 
 Secondary safeguard: trade-execution scripts should check open orders by
 `client_order_id` prefix before submission. Example gate:
@@ -62,9 +88,9 @@ if recent: skip()
 ```
 
 ## Follow-up items
-- [x] ~~PR to add HEARTBEAT progress-state gate (src/daemon.ts)~~ — JuneClaw PR #57 (activePhones gate + stateless HEARTBEAT + gate test)
-- [ ] Add trade-execution idempotency check (gwangsu/algo — shared helper)
-- [x] ~~Update R-E08 rule text to cover intra-daemon concurrency, not just process-level~~ — workspace master-rules.md updated 2026-04-24
+- [x] ~~PR to add HEARTBEAT progress-state gate (src/daemon.ts)~~ — JuneClaw PR #57 (activePhones gate + stateless HEARTBEAT + gate test). **Open as of 2026-04-24; flip to `[x]` on merge.**
+- [x] ~~Add trade-execution idempotency check (gwangsu/algo — shared helper)~~ — gwangsu PR #108 (`_recent_duplicate_order` in `adaptive_autotrader.py`). **Open as of 2026-04-24.**
+- [x] ~~Update R-E08 rule text to cover intra-daemon concurrency, not just process-level~~ — workspace `memory/lessons/master-rules.md` updated 2026-04-24
 
 ## Orders left in place (1 session)
 SNDK x2 @ $944, MU x3 @ $484.91, GOOG x6 @ $338.15, NVDA x8 @ $199.49,
