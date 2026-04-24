@@ -800,67 +800,71 @@ async function runHeartbeat(
   // Reserve the phone for the heartbeat so the queue drain can't dispatch a
   // parallel worker while we run — the reverse of the above race. Symmetric
   // with the queue drain's own add/delete at the worker submit site.
+  // The try/finally wraps the entire body so the reservation is always
+  // released, even if a non-awaited synchronous step between here and the
+  // inner try block were to throw.
   activePhones.add(phone);
-
-  log("[heartbeat] running...");
-
-  // Clean up stale pending exchanges (older than 10 minutes)
-  const staleThreshold = Date.now() - 10 * 60_000;
-  for (const [pendingPhone, pending] of pendingExchanges) {
-    if (new Date(pending.timestamp).getTime() < staleThreshold) {
-      pendingExchanges.delete(pendingPhone);
-    }
-  }
-
-  // Flush in-memory exchange counter to disk
-  await flushExchangeCount().catch((err) => {
-    log(`[heartbeat] exchange count flush failed: ${err instanceof Error ? err.message : String(err)}`);
-  });
-
   try {
-    // Orphan detection + archive before heartbeat
-    const orphanResult = await cleanupStaleAgents();
-    if (orphanResult !== "no orphans") {
-      log(`[heartbeat] orphan cleanup: ${orphanResult}`);
-      await emit("agent:orphan_detected", { result: orphanResult });
+    log("[heartbeat] running...");
+
+    // Clean up stale pending exchanges (older than 10 minutes)
+    const staleThreshold = Date.now() - 10 * 60_000;
+    for (const [pendingPhone, pending] of pendingExchanges) {
+      if (new Date(pending.timestamp).getTime() < staleThreshold) {
+        pendingExchanges.delete(pendingPhone);
+      }
     }
-    // cmd_cleanup prints "Cleaned N entries. M running." — suppress the
-    // no-op case (N == 0) so we only log when something actually happened.
-    const cleanupResult = await cleanupCompletedAgents();
-    if (cleanupResult && !cleanupResult.startsWith("Cleaned 0 ")) {
-      log(`[heartbeat] ${cleanupResult}`);
+
+    // Flush in-memory exchange counter to disk
+    await flushExchangeCount().catch((err) => {
+      log(`[heartbeat] exchange count flush failed: ${err instanceof Error ? err.message : String(err)}`);
+    });
+
+    try {
+      // Orphan detection + archive before heartbeat
+      const orphanResult = await cleanupStaleAgents();
+      if (orphanResult !== "no orphans") {
+        log(`[heartbeat] orphan cleanup: ${orphanResult}`);
+        await emit("agent:orphan_detected", { result: orphanResult });
+      }
+      // cmd_cleanup prints "Cleaned N entries. M running." — suppress the
+      // no-op case (N == 0) so we only log when something actually happened.
+      const cleanupResult = await cleanupCompletedAgents();
+      if (cleanupResult && !cleanupResult.startsWith("Cleaned 0 ")) {
+        log(`[heartbeat] ${cleanupResult}`);
+      }
+      const pruned = pruneStaleStates();
+      if (pruned > 0) log(`[heartbeat] pruned ${pruned} stale rotation states`);
+
+      const systemPrompt = await buildSystemPrompt("june", name);
+
+      const prompt = `HEARTBEAT: Check HEARTBEAT.md and follow it. Current time: ${now.toISOString()}. Reply HEARTBEAT_OK if nothing needs attention, otherwise take action.`;
+
+      // Stateless: do NOT resume the general session. The general session may
+      // contain an in-flight user message that a heartbeat claude would
+      // mistakenly re-execute; keeping the heartbeat free of conversation
+      // history eliminates that failure mode.
+      const result = await runClaude({ prompt, systemPrompt, taskType: "general" });
+
+      state.lastHeartbeatAt = now.toISOString();
+      await saveState();
+      // Update lock mtime so watchdog can verify liveness
+      await daemonLock?.touch();
+
+      const response = result.response.trim();
+      if (response.includes("HEARTBEAT_OK") || response.includes("NO_REPLY")) {
+        log("[heartbeat] OK");
+        await emit("heartbeat:ok", { time: now.toISOString() });
+      } else {
+        log(`[heartbeat] action taken: ${response.slice(0, 100)}`);
+        await channel.sendMessage(response);
+        await emit("heartbeat:action", { response: response.slice(0, 200) });
+      }
+    } catch (err) {
+      logError("[heartbeat] failed", err);
+      await logFromError(err, "heartbeat");
+      await emit("heartbeat:failed", { error: String(err) });
     }
-    const pruned = pruneStaleStates();
-    if (pruned > 0) log(`[heartbeat] pruned ${pruned} stale rotation states`);
-
-    const systemPrompt = await buildSystemPrompt("june", name);
-
-    const prompt = `HEARTBEAT: Check HEARTBEAT.md and follow it. Current time: ${now.toISOString()}. Reply HEARTBEAT_OK if nothing needs attention, otherwise take action.`;
-
-    // Stateless: do NOT resume the general session. The general session may
-    // contain an in-flight user message that a heartbeat claude would
-    // mistakenly re-execute; keeping the heartbeat free of conversation
-    // history eliminates that failure mode.
-    const result = await runClaude({ prompt, systemPrompt, taskType: "general" });
-
-    state.lastHeartbeatAt = now.toISOString();
-    await saveState();
-    // Update lock mtime so watchdog can verify liveness
-    await daemonLock?.touch();
-
-    const response = result.response.trim();
-    if (response.includes("HEARTBEAT_OK") || response.includes("NO_REPLY")) {
-      log("[heartbeat] OK");
-      await emit("heartbeat:ok", { time: now.toISOString() });
-    } else {
-      log(`[heartbeat] action taken: ${response.slice(0, 100)}`);
-      await channel.sendMessage(response);
-      await emit("heartbeat:action", { response: response.slice(0, 200) });
-    }
-  } catch (err) {
-    logError("[heartbeat] failed", err);
-    await logFromError(err, "heartbeat");
-    await emit("heartbeat:failed", { error: String(err) });
   } finally {
     activePhones.delete(phone);
   }
