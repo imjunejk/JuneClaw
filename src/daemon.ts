@@ -58,6 +58,7 @@ import { DurableQueue } from "./lib/durable-queue.js";
 import { WorkerPool } from "./lib/worker-pool.js";
 import { atomicWriteFile } from "./lib/atomic-file.js";
 import { tryAcquireDaemonLock, type DaemonLock } from "./lib/daemon-lock.js";
+import { evaluateHeartbeat } from "./heartbeat-gate.js";
 import type { Channel } from "./gateway/types.js";
 
 function log(msg: string): void {
@@ -786,14 +787,20 @@ async function runHeartbeat(
   const name = channelConfig.name;
   const now = new Date();
 
-  // R-E08: if a general worker is already processing a user message on this
-  // phone, skip. Otherwise HEARTBEAT spawns a parallel claude on the same
-  // sessionId and both instances act on the same unanswered message — which
-  // caused the 2026-04-24 duplicate trade-order incident (MU x3).
-  if (activePhones.has(phone)) {
-    log("[heartbeat] skipping — worker active for this phone");
+  // R-E08 gate: if a worker is already processing a user message on this
+  // phone, skip. Otherwise HEARTBEAT spawns a parallel claude and both
+  // instances can act on the same unanswered message — the 2026-04-24
+  // duplicate trade-order incident (MU x3).
+  const decision = evaluateHeartbeat(phone, activePhones);
+  if (decision.action === "skip") {
+    log(`[heartbeat] skipping — ${decision.reason}`);
     return;
   }
+
+  // Reserve the phone for the heartbeat so the queue drain can't dispatch a
+  // parallel worker while we run — the reverse of the above race. Symmetric
+  // with the queue drain's own add/delete at the worker submit site.
+  activePhones.add(phone);
 
   log("[heartbeat] running...");
 
@@ -827,15 +834,14 @@ async function runHeartbeat(
     if (pruned > 0) log(`[heartbeat] pruned ${pruned} stale rotation states`);
 
     const systemPrompt = await buildSystemPrompt("june", name);
-    const sessionId = await getSessionId(phone, "general");
 
     const prompt = `HEARTBEAT: Check HEARTBEAT.md and follow it. Current time: ${now.toISOString()}. Reply HEARTBEAT_OK if nothing needs attention, otherwise take action.`;
 
-    const result = await runClaude({ prompt, systemPrompt, sessionId, taskType: "general" });
-
-    if (result.sessionId) {
-      await setSessionId(phone, result.sessionId, "general");
-    }
+    // Stateless: do NOT resume the general session. The general session may
+    // contain an in-flight user message that a heartbeat claude would
+    // mistakenly re-execute; keeping the heartbeat free of conversation
+    // history eliminates that failure mode.
+    const result = await runClaude({ prompt, systemPrompt, taskType: "general" });
 
     state.lastHeartbeatAt = now.toISOString();
     await saveState();
@@ -855,6 +861,8 @@ async function runHeartbeat(
     logError("[heartbeat] failed", err);
     await logFromError(err, "heartbeat");
     await emit("heartbeat:failed", { error: String(err) });
+  } finally {
+    activePhones.delete(phone);
   }
 
   // Hill-climbing + autoDream: single dreamState load for both checks
