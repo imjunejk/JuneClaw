@@ -78,18 +78,26 @@ Two additional hardenings in PR #57:
    `try/finally` around the full body, matching the worker-pool drain at
    `daemon.ts:1335/1358`. Either side sees the other as busy via `has()`.
 
-Secondary safeguard: trade-execution scripts should check open orders by
-`client_order_id` prefix before submission. Example gate:
-```py
-# Skip if identical intent already open within last 10 min
-recent = [o for o in open_orders
-          if o["symbol"] == sym and (now - parse(o["created_at"])) < 600]
-if recent: skip()
-```
+Secondary safeguard (implemented — gwangsu PR #108): shared
+`_order_dedup.py` helper routes every strategy's `POST /v2/orders`
+through two complementary gates:
+
+1. **Pre-submission check** (`recent_duplicate_order`) — scans open
+   orders for a matching `(symbol, side, type)` within 10 min, fail-open
+   on transient API errors, `limit=500` to cover sweeps beyond the
+   Alpaca default of 50.
+2. **Broker-side backstop** (`deterministic_client_order_id`) — builds
+   a coid of the form `{prefix}-{side}-{symbol}-{minute_bucket}` so two
+   racing callers inside the same minute collide at Alpaca (422 duplicate
+   coid), closing the TOCTOU window that the pre-check alone can't.
+
+The `adaptive_autotrader`, `agitq_trader`, `vcp_margin_trader`,
+`sepa_manager`, `pump_swing_trader`, and `tqqq_switch` strategies all
+share the helper — single source of truth instead of six drifting copies.
 
 ## Follow-up items
 - [ ] PR to add HEARTBEAT progress-state gate (src/daemon.ts) — JuneClaw PR #57 (activePhones gate + stateless HEARTBEAT + gate test). **Open as of 2026-04-24; flip to `[x]` on merge.**
-- [ ] Add trade-execution idempotency check (gwangsu/algo — shared helper) — gwangsu PR #108 (`_recent_duplicate_order` in `adaptive_autotrader.py`). **Open as of 2026-04-24; flip to `[x]` on merge.**
+- [ ] Add trade-execution idempotency check (gwangsu/algo — shared helper) — gwangsu PR #108 (`_order_dedup.py` shared across 6 strategies; pre-check + deterministic coid). **Open as of 2026-04-24; flip to `[x]` on merge.**
 - [x] ~~Update R-E08 rule text to cover intra-daemon concurrency, not just process-level~~ — workspace `memory/lessons/master-rules.md` updated 2026-04-24
 
 ## Orders left in place (1 session)
