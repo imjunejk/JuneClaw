@@ -88,8 +88,8 @@ if recent: skip()
 ```
 
 ## Follow-up items
-- [x] ~~PR to add HEARTBEAT progress-state gate (src/daemon.ts)~~ — JuneClaw PR #57 (activePhones gate + stateless HEARTBEAT + gate test). **Open as of 2026-04-24; flip to `[x]` on merge.**
-- [x] ~~Add trade-execution idempotency check (gwangsu/algo — shared helper)~~ — gwangsu PR #108 (`_recent_duplicate_order` in `adaptive_autotrader.py`). **Open as of 2026-04-24.**
+- [ ] PR to add HEARTBEAT progress-state gate (src/daemon.ts) — JuneClaw PR #57 (activePhones gate + stateless HEARTBEAT + gate test). **Open as of 2026-04-24; flip to `[x]` on merge.**
+- [ ] Add trade-execution idempotency check (gwangsu/algo — shared helper) — gwangsu PR #108 (`_recent_duplicate_order` in `adaptive_autotrader.py`). **Open as of 2026-04-24; flip to `[x]` on merge.**
 - [x] ~~Update R-E08 rule text to cover intra-daemon concurrency, not just process-level~~ — workspace `memory/lessons/master-rules.md` updated 2026-04-24
 
 ## Orders left in place (1 session)
