@@ -786,6 +786,15 @@ async function runHeartbeat(
   const name = channelConfig.name;
   const now = new Date();
 
+  // R-E08: if a general worker is already processing a user message on this
+  // phone, skip. Otherwise HEARTBEAT spawns a parallel claude on the same
+  // sessionId and both instances act on the same unanswered message — which
+  // caused the 2026-04-24 duplicate trade-order incident (MU x3).
+  if (activePhones.has(phone)) {
+    log("[heartbeat] skipping — worker active for this phone");
+    return;
+  }
+
   log("[heartbeat] running...");
 
   // Clean up stale pending exchanges (older than 10 minutes)
