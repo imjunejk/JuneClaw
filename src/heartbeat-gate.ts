@@ -22,3 +22,21 @@ export function evaluateHeartbeat(
   }
   return { action: "run" };
 }
+
+/**
+ * Identify which component currently holds a phone's worker slot, for the
+ * queue drain's deferral log. Returns null if the phone is free.
+ *
+ * `activeHeartbeats` is a subset of `activeWorkers`: runHeartbeat adds to
+ * both, the worker pool only adds to `activeWorkers`. When the phone is
+ * busy, the heartbeat set disambiguates so operators can tell why a user
+ * message is being delayed.
+ */
+export function describePhoneHolder(
+  phone: string,
+  activeWorkers: ReadonlySet<string>,
+  activeHeartbeats: ReadonlySet<string>,
+): "heartbeat" | "worker" | null {
+  if (!activeWorkers.has(phone)) return null;
+  return activeHeartbeats.has(phone) ? "heartbeat" : "worker";
+}

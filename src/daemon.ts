@@ -58,7 +58,7 @@ import { DurableQueue } from "./lib/durable-queue.js";
 import { WorkerPool } from "./lib/worker-pool.js";
 import { atomicWriteFile } from "./lib/atomic-file.js";
 import { tryAcquireDaemonLock, type DaemonLock } from "./lib/daemon-lock.js";
-import { evaluateHeartbeat } from "./heartbeat-gate.js";
+import { describePhoneHolder, evaluateHeartbeat } from "./heartbeat-gate.js";
 import type { Channel } from "./gateway/types.js";
 
 function log(msg: string): void {
@@ -1333,8 +1333,8 @@ export async function startDaemon(): Promise<void> {
         }
 
         // Per-phone serialization: skip if this phone already has an active worker
-        if (activePhones.has(phone)) {
-          const holder = heartbeatActivePhones.has(phone) ? "heartbeat" : "worker";
+        const holder = describePhoneHolder(phone, activePhones, heartbeatActivePhones);
+        if (holder !== null) {
           log(`[pool] deferring ${task.id} — phone ${phone} busy (${holder} active)`);
           await messageQueue.release(task.id);
           break;
