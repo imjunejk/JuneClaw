@@ -14,11 +14,18 @@
  */
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { URL } from "node:url";
+import { createHmac, timingSafeEqual } from "node:crypto";
+import { config } from "../config.js";
 
 const BRIDGE_PORT = Number(process.env.JUNECLAW_BRIDGE_PORT) || 3200;
 const BRIDGE_HOST = "127.0.0.1";
 const ALLOW_WRITE = process.env.JUNECLAW_BRIDGE_ALLOW_WRITE === "1";
 const MAX_BODY_SIZE = 1_000_000; // 1 MB
+
+// Signup webhook — galleon.market 가입 요청 수신용.
+// HMAC-SHA256 (hex) 시그니처 검증 — 노출 endpoint (cloudflared tunnel) 보호.
+// June 의 phone (config.channels.june.phone) 으로 iMessage 자동 전송.
+const SIGNUP_WEBHOOK_SECRET = process.env.JUNECLAW_SIGNUP_WEBHOOK_SECRET ?? "";
 
 class BodyTooLargeError extends Error {
   constructor() {
@@ -161,6 +168,103 @@ routes.set("POST /bridge/send-to-phone", async (req, res) => {
 
     await context.sendToPhone(phone, text);
     json(res, 200, { ok: true, phone: phone.slice(0, 4) + "***" + phone.slice(-4) });
+  } catch (err) {
+    json(res, 500, { error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+// ─── Galleon 가입 요청 webhook ────────────────────────────
+// galleon.market 의 CF Pages Function 이 미등록 사용자 가입 요청을 보내면
+// June 에게 iMessage 알림. 외부 노출 (cloudflared) 가정 — HMAC 검증 필수.
+//
+// 흐름:
+//   CF Function POST → cloudflared tunnel → bridge POST /webhook/signup-request
+//   header: x-signature: <HMAC-SHA256-hex of raw body using SIGNUP_WEBHOOK_SECRET>
+//   body  : {identifier, kind, display, name?, requested_at, user_agent?, ip?}
+//   → June iMessage: "🆕 가입 요청 — display (kind, name) — 승인하려면 ..."
+//
+// 미설정 (SIGNUP_WEBHOOK_SECRET 비어 있음) 시 503.
+routes.set("POST /webhook/signup-request", async (req, res) => {
+  if (!SIGNUP_WEBHOOK_SECRET) {
+    return json(res, 503, { error: "signup webhook not configured (set JUNECLAW_SIGNUP_WEBHOOK_SECRET)" });
+  }
+  if (!context.sendToPhone) {
+    return json(res, 503, { error: "sendToPhone not wired" });
+  }
+
+  // Raw body 읽기 — HMAC 비교에 필요 (JSON.parse 재직렬화 시 변동 위험)
+  let raw: string;
+  try {
+    raw = await new Promise<string>((resolve, reject) => {
+      const chunks: Buffer[] = [];
+      let size = 0;
+      let aborted = false;
+      req.on("data", (c: Buffer) => {
+        if (aborted) return;
+        size += c.length;
+        if (size > MAX_BODY_SIZE) {
+          aborted = true;
+          reject(new BodyTooLargeError());
+          return;
+        }
+        chunks.push(c);
+      });
+      req.on("end", () => {
+        if (aborted) return;
+        resolve(Buffer.concat(chunks).toString("utf-8"));
+      });
+      req.on("error", (err) => {
+        if (aborted) return;
+        reject(err);
+      });
+    });
+  } catch (err) {
+    if (handleBodyError(res, err)) return;
+    return json(res, 500, { error: err instanceof Error ? err.message : String(err) });
+  }
+
+  // HMAC 검증
+  const provided = (req.headers["x-signature"] as string | undefined) ?? "";
+  const expected = createHmac("sha256", SIGNUP_WEBHOOK_SECRET).update(raw).digest("hex");
+  // timingSafeEqual 은 동일 길이 버퍼 요구 — 길이부터 체크
+  if (provided.length !== expected.length) {
+    return json(res, 401, { error: "invalid signature (length)" });
+  }
+  try {
+    const ok = timingSafeEqual(Buffer.from(provided), Buffer.from(expected));
+    if (!ok) return json(res, 401, { error: "invalid signature" });
+  } catch {
+    return json(res, 401, { error: "invalid signature" });
+  }
+
+  // 본문 파싱
+  let body: Record<string, unknown>;
+  try {
+    body = raw ? JSON.parse(raw) : {};
+  } catch (err) {
+    return json(res, 400, { error: `Invalid JSON: ${err instanceof Error ? err.message : String(err)}` });
+  }
+
+  const display = String(body.display ?? body.identifier ?? "").slice(0, 80);
+  const kind = String(body.kind ?? "").slice(0, 10);
+  const name = String(body.name ?? "").slice(0, 40);
+  const requestedAt = String(body.requested_at ?? new Date().toISOString());
+  const ip = String(body.ip ?? "").slice(0, 64);
+  if (!display) return json(res, 400, { error: "missing identifier/display" });
+
+  const text = [
+    "🆕 갈레온 가입 요청",
+    `${kind === "email" ? "✉️ Email" : "📱 Phone"}: ${display}`,
+    name ? `이름: ${name}` : null,
+    `요청: ${requestedAt}`,
+    ip ? `IP: ${ip}` : null,
+    "",
+    "승인 시 LOGIN_ALLOWLIST env var 에 추가 (CF dashboard).",
+  ].filter(Boolean).join("\n");
+
+  try {
+    await context.sendToPhone(config.channels.june.phone, text);
+    json(res, 200, { ok: true, sent_to: config.channels.june.phone.slice(0, 4) + "***" + config.channels.june.phone.slice(-4) });
   } catch (err) {
     json(res, 500, { error: err instanceof Error ? err.message : String(err) });
   }
