@@ -181,63 +181,98 @@ routes.set("POST /bridge/send-to-phone", async (req, res) => {
 //   CF Function POST → cloudflared tunnel → bridge POST /webhook/signup-request
 //   header: x-signature: <HMAC-SHA256-hex of raw body using SIGNUP_WEBHOOK_SECRET>
 //   body  : {identifier, kind, display, name?, requested_at, user_agent?, ip?}
-//   → June iMessage: "🆕 가입 요청 — display (kind, name) — 승인하려면 ..."
+//   → June iMessage
 //
-// 미설정 (SIGNUP_WEBHOOK_SECRET 비어 있음) 시 503.
+// 미설정 (SIGNUP_WEBHOOK_SECRET 비어 있음) 시 404 (endpoint 노출 회피).
+
+/** Raw body 읽기 — HMAC 비교용. JSON.parse 후 재직렬화 시 byte 변동 위험으로 직접 처리. */
+async function readRawBody(req: IncomingMessage): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    let aborted = false;
+    req.on("data", (c: Buffer) => {
+      if (aborted) return;
+      size += c.length;
+      if (size > MAX_BODY_SIZE) {
+        aborted = true;
+        reject(new BodyTooLargeError());
+        return;
+      }
+      chunks.push(c);
+    });
+    req.on("end", () => {
+      if (aborted) return;
+      resolve(Buffer.concat(chunks).toString("utf-8"));
+    });
+    req.on("error", (err) => {
+      if (aborted) return;
+      reject(err);
+    });
+  });
+}
+
+/**
+ * Signup webhook HMAC 검증 — pure 함수 (테스트 가능).
+ *
+ * Minor #1: Array.isArray guard — 이론상 string[] 가능 (Node parser 가 보통
+ *   comma-join 하지만 명시적으로 처리).
+ * Minor #2: Buffer.from(hex, "hex") 로 명시적 hex 디코딩 (UTF-8 default 보다
+ *   idiomatic + malformed hex early reject).
+ *
+ * @returns true 면 유효, false 면 거절
+ */
+export function verifySignupSignature(
+  rawBody: string,
+  providedHeader: string | string[] | undefined,
+  secret: string,
+): boolean {
+  if (!secret) return false;
+  if (Array.isArray(providedHeader)) return false;  // 다중 헤더 즉시 거절
+  const provided = providedHeader ?? "";
+  const expected = createHmac("sha256", secret).update(rawBody).digest("hex");
+  // 길이 mismatch — timingSafeEqual 호출 전 prepass (timingSafeEqual 은 길이 다르면 throw)
+  if (provided.length !== expected.length) return false;
+  // hex 디코딩 — malformed hex 도 여기서 catch
+  let providedBuf: Buffer;
+  let expectedBuf: Buffer;
+  try {
+    providedBuf = Buffer.from(provided, "hex");
+    expectedBuf = Buffer.from(expected, "hex");
+  } catch {
+    return false;
+  }
+  // hex 디코딩 후 길이 또 체크 (malformed 면 짧아질 수 있음)
+  if (providedBuf.length !== expectedBuf.length) return false;
+  if (providedBuf.length === 0) return false;
+  try {
+    return timingSafeEqual(providedBuf, expectedBuf);
+  } catch {
+    return false;
+  }
+}
+
 routes.set("POST /webhook/signup-request", async (req, res) => {
+  // Minor #3: SECRET 미설정 시 404 — endpoint 존재 자체 미노출 (이전 503 대비 tighter).
   if (!SIGNUP_WEBHOOK_SECRET) {
-    return json(res, 503, { error: "signup webhook not configured (set JUNECLAW_SIGNUP_WEBHOOK_SECRET)" });
+    return json(res, 404, { error: "Not found" });
   }
   if (!context.sendToPhone) {
     return json(res, 503, { error: "sendToPhone not wired" });
   }
 
-  // Raw body 읽기 — HMAC 비교에 필요 (JSON.parse 재직렬화 시 변동 위험)
   let raw: string;
   try {
-    raw = await new Promise<string>((resolve, reject) => {
-      const chunks: Buffer[] = [];
-      let size = 0;
-      let aborted = false;
-      req.on("data", (c: Buffer) => {
-        if (aborted) return;
-        size += c.length;
-        if (size > MAX_BODY_SIZE) {
-          aborted = true;
-          reject(new BodyTooLargeError());
-          return;
-        }
-        chunks.push(c);
-      });
-      req.on("end", () => {
-        if (aborted) return;
-        resolve(Buffer.concat(chunks).toString("utf-8"));
-      });
-      req.on("error", (err) => {
-        if (aborted) return;
-        reject(err);
-      });
-    });
+    raw = await readRawBody(req);
   } catch (err) {
     if (handleBodyError(res, err)) return;
     return json(res, 500, { error: err instanceof Error ? err.message : String(err) });
   }
 
-  // HMAC 검증
-  const provided = (req.headers["x-signature"] as string | undefined) ?? "";
-  const expected = createHmac("sha256", SIGNUP_WEBHOOK_SECRET).update(raw).digest("hex");
-  // timingSafeEqual 은 동일 길이 버퍼 요구 — 길이부터 체크
-  if (provided.length !== expected.length) {
-    return json(res, 401, { error: "invalid signature (length)" });
-  }
-  try {
-    const ok = timingSafeEqual(Buffer.from(provided), Buffer.from(expected));
-    if (!ok) return json(res, 401, { error: "invalid signature" });
-  } catch {
+  if (!verifySignupSignature(raw, req.headers["x-signature"], SIGNUP_WEBHOOK_SECRET)) {
     return json(res, 401, { error: "invalid signature" });
   }
 
-  // 본문 파싱
   let body: Record<string, unknown>;
   try {
     body = raw ? JSON.parse(raw) : {};
@@ -246,9 +281,11 @@ routes.set("POST /webhook/signup-request", async (req, res) => {
   }
 
   const display = String(body.display ?? body.identifier ?? "").slice(0, 80);
+  // Minor #1 / Nit: kind 가 "email" 외 모든 값 → Phone (default). 빈 문자열 / undefined / 잘못된 값 모두 동일.
   const kind = String(body.kind ?? "").slice(0, 10);
   const name = String(body.name ?? "").slice(0, 40);
-  const requestedAt = String(body.requested_at ?? new Date().toISOString());
+  // Nit: requested_at 도 다른 필드처럼 길이 cap (40 chars — ISO timestamp 27자 충분).
+  const requestedAt = String(body.requested_at ?? new Date().toISOString()).slice(0, 40);
   const ip = String(body.ip ?? "").slice(0, 64);
   if (!display) return json(res, 400, { error: "missing identifier/display" });
 
@@ -264,7 +301,8 @@ routes.set("POST /webhook/signup-request", async (req, res) => {
 
   try {
     await context.sendToPhone(config.channels.june.phone, text);
-    json(res, 200, { ok: true, sent_to: config.channels.june.phone.slice(0, 4) + "***" + config.channels.june.phone.slice(-4) });
+    // Minor #4: PII echo 제거 — masked phone 도 식별 정보. 단순 ok.
+    json(res, 200, { ok: true });
   } catch (err) {
     json(res, 500, { error: err instanceof Error ? err.message : String(err) });
   }
