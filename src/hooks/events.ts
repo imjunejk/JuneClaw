@@ -6,6 +6,7 @@ export type DaemonEvent =
   | "heartbeat:ok"
   | "heartbeat:action"
   | "heartbeat:failed"
+  | "heartbeat:gated"
   | "message:received"
   | "message:responded"
   | "message:error"

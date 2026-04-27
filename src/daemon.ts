@@ -58,6 +58,7 @@ import { DurableQueue } from "./lib/durable-queue.js";
 import { WorkerPool } from "./lib/worker-pool.js";
 import { atomicWriteFile } from "./lib/atomic-file.js";
 import { tryAcquireDaemonLock, type DaemonLock } from "./lib/daemon-lock.js";
+import { describePhoneHolder, evaluateHeartbeat } from "./heartbeat-gate.js";
 import type { Channel } from "./gateway/types.js";
 
 function log(msg: string): void {
@@ -133,6 +134,10 @@ const taskPriority: Record<TaskType, number> = { coding: 0, research: 1, general
 
 // Track which phones have an active heavy worker to prevent session conflicts
 const activePhones = new Set<string>();
+// Subset of activePhones reserved by runHeartbeat — used only for richer
+// drain-deferral logs so we can distinguish "held by worker" vs "held by
+// heartbeat" without changing gate semantics.
+const heartbeatActivePhones = new Set<string>();
 
 const workerPool = new WorkerPool({
   maxWorkers: 2,
@@ -787,66 +792,89 @@ async function runHeartbeat(
   const name = channelConfig.name;
   const now = new Date();
 
-  log("[heartbeat] running...");
+  // R-E08 gate: if a worker is already processing a user message on this
+  // phone, skip the claude invocation (but still run autoDream below).
+  // Otherwise HEARTBEAT spawns a parallel claude and both instances can act
+  // on the same unanswered message — the 2026-04-24 duplicate trade-order
+  // incident (MU x3).
+  const decision = evaluateHeartbeat(phone, activePhones);
+  if (decision.action === "skip") {
+    log(`[heartbeat] skipping claude invocation — ${decision.reason}; autoDream will still run`);
+    await emit("heartbeat:gated", { reason: decision.reason });
+  } else {
+    // Reserve the phone for the heartbeat so the queue drain can't dispatch a
+    // parallel worker while we run — the reverse of the above race. Symmetric
+    // with the queue drain's own add/delete at the worker submit site.
+    // The try/finally wraps the entire body so the reservation is always
+    // released, even if a non-awaited synchronous step between here and the
+    // inner try block were to throw.
+    activePhones.add(phone);
+    heartbeatActivePhones.add(phone);
+    try {
+      log("[heartbeat] running...");
 
-  // Clean up stale pending exchanges (older than 10 minutes)
-  const staleThreshold = Date.now() - 10 * 60_000;
-  for (const [pendingPhone, pending] of pendingExchanges) {
-    if (new Date(pending.timestamp).getTime() < staleThreshold) {
-      pendingExchanges.delete(pendingPhone);
+      // Clean up stale pending exchanges (older than 10 minutes)
+      const staleThreshold = Date.now() - 10 * 60_000;
+      for (const [pendingPhone, pending] of pendingExchanges) {
+        if (new Date(pending.timestamp).getTime() < staleThreshold) {
+          pendingExchanges.delete(pendingPhone);
+        }
+      }
+
+      // Flush in-memory exchange counter to disk
+      await flushExchangeCount().catch((err) => {
+        log(`[heartbeat] exchange count flush failed: ${err instanceof Error ? err.message : String(err)}`);
+      });
+
+      try {
+        // Orphan detection + archive before heartbeat
+        const orphanResult = await cleanupStaleAgents();
+        if (orphanResult !== "no orphans") {
+          log(`[heartbeat] orphan cleanup: ${orphanResult}`);
+          await emit("agent:orphan_detected", { result: orphanResult });
+        }
+        // cmd_cleanup prints "Cleaned N entries. M running." — suppress the
+        // no-op case (N == 0) so we only log when something actually happened.
+        const cleanupResult = await cleanupCompletedAgents();
+        if (cleanupResult && !cleanupResult.startsWith("Cleaned 0 ")) {
+          log(`[heartbeat] ${cleanupResult}`);
+        }
+        const pruned = pruneStaleStates();
+        if (pruned > 0) log(`[heartbeat] pruned ${pruned} stale rotation states`);
+
+        const systemPrompt = await buildSystemPrompt("june", name);
+
+        const prompt = `HEARTBEAT: Check HEARTBEAT.md and follow it. Current time: ${now.toISOString()}. Reply HEARTBEAT_OK if nothing needs attention, otherwise take action.`;
+
+        // Stateless: do NOT resume the general session. The general session may
+        // contain an in-flight user message that a heartbeat claude would
+        // mistakenly re-execute; keeping the heartbeat free of conversation
+        // history eliminates that failure mode.
+        const result = await runClaude({ prompt, systemPrompt, taskType: "general" });
+
+        state.lastHeartbeatAt = now.toISOString();
+        await saveState();
+        // Update lock mtime so watchdog can verify liveness
+        await daemonLock?.touch();
+
+        const response = result.response.trim();
+        if (response.includes("HEARTBEAT_OK") || response.includes("NO_REPLY")) {
+          log("[heartbeat] OK");
+          await emit("heartbeat:ok", { time: now.toISOString() });
+        } else {
+          log(`[heartbeat] action taken: ${response.slice(0, 100)}`);
+          await channel.sendMessage(response);
+          await emit("heartbeat:action", { response: response.slice(0, 200) });
+        }
+      } catch (err) {
+        logError("[heartbeat] failed", err);
+        await logFromError(err, "heartbeat");
+        await emit("heartbeat:failed", { error: String(err) });
+      }
+    } finally {
+      heartbeatActivePhones.delete(phone);
+      activePhones.delete(phone);
     }
-  }
-
-  // Flush in-memory exchange counter to disk
-  await flushExchangeCount().catch((err) => {
-    log(`[heartbeat] exchange count flush failed: ${err instanceof Error ? err.message : String(err)}`);
-  });
-
-  try {
-    // Orphan detection + archive before heartbeat
-    const orphanResult = await cleanupStaleAgents();
-    if (orphanResult !== "no orphans") {
-      log(`[heartbeat] orphan cleanup: ${orphanResult}`);
-      await emit("agent:orphan_detected", { result: orphanResult });
-    }
-    // cmd_cleanup prints "Cleaned N entries. M running." — suppress the
-    // no-op case (N == 0) so we only log when something actually happened.
-    const cleanupResult = await cleanupCompletedAgents();
-    if (cleanupResult && !cleanupResult.startsWith("Cleaned 0 ")) {
-      log(`[heartbeat] ${cleanupResult}`);
-    }
-    const pruned = pruneStaleStates();
-    if (pruned > 0) log(`[heartbeat] pruned ${pruned} stale rotation states`);
-
-    const systemPrompt = await buildSystemPrompt("june", name);
-    const sessionId = await getSessionId(phone, "general");
-
-    const prompt = `HEARTBEAT: Check HEARTBEAT.md and follow it. Current time: ${now.toISOString()}. Reply HEARTBEAT_OK if nothing needs attention, otherwise take action.`;
-
-    const result = await runClaude({ prompt, systemPrompt, sessionId, taskType: "general" });
-
-    if (result.sessionId) {
-      await setSessionId(phone, result.sessionId, "general");
-    }
-
-    state.lastHeartbeatAt = now.toISOString();
-    await saveState();
-    // Update lock mtime so watchdog can verify liveness
-    await daemonLock?.touch();
-
-    const response = result.response.trim();
-    if (response.includes("HEARTBEAT_OK") || response.includes("NO_REPLY")) {
-      log("[heartbeat] OK");
-      await emit("heartbeat:ok", { time: now.toISOString() });
-    } else {
-      log(`[heartbeat] action taken: ${response.slice(0, 100)}`);
-      await channel.sendMessage(response);
-      await emit("heartbeat:action", { response: response.slice(0, 200) });
-    }
-  } catch (err) {
-    logError("[heartbeat] failed", err);
-    await logFromError(err, "heartbeat");
-    await emit("heartbeat:failed", { error: String(err) });
   }
 
   // Hill-climbing + autoDream: single dreamState load for both checks
@@ -1265,7 +1293,9 @@ export async function startDaemon(): Promise<void> {
         }
 
         // Per-phone serialization: skip if this phone already has an active worker
-        if (activePhones.has(phone)) {
+        const holder = describePhoneHolder(phone, activePhones, heartbeatActivePhones);
+        if (holder !== null) {
+          log(`[pool] deferring ${task.id} — phone ${phone} busy (${holder} active)`);
           await messageQueue.release(task.id);
           break;
         }
