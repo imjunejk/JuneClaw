@@ -158,8 +158,34 @@ function buildBashCommand(
 }
 
 /**
+ * Append captured output to a job's log file. Best-effort — write failures
+ * (missing dir, permissions) are swallowed since the cron path can't recover.
+ */
+async function appendJobLog(
+  logFile: string,
+  cwd: string,
+  label: string,
+  stdout: string,
+  stderr: string,
+  status: "OK" | "FAILED",
+): Promise<void> {
+  const logPath = isAbsolute(logFile) ? logFile : join(cwd, logFile);
+  const ts = new Date().toISOString();
+  const stamped = `\n--- ${ts} [${label}] [${status}] ---\n${stdout}${stderr ? `\nSTDERR:\n${stderr}` : ""}`;
+  try {
+    await appendFile(logPath, stamped, "utf-8");
+  } catch {
+    // logFile dir may not exist or be writable — non-fatal
+  }
+}
+
+/**
  * Run a single command (main or post) under bash, capture output,
  * append to logFile if provided, and return last-3-line summary.
+ *
+ * On failure, partial stdout/stderr captured by Node's execFile (attached to
+ * the thrown error) is appended to logFile before the error is re-thrown,
+ * so timeouts and non-zero exits are debuggable.
  */
 async function runCommand(opts: {
   command: string[];
@@ -172,22 +198,32 @@ async function runCommand(opts: {
 }): Promise<{ tail: string; stderrPreview: string }> {
   const bashCmd = buildBashCommand(opts.command, opts.envFile, opts.cwd);
   const env: NodeJS.ProcessEnv = { ...process.env, ...(opts.env ?? {}) };
-  const { stdout, stderr } = await execFileAsync("bash", ["-c", bashCmd], {
-    cwd: opts.cwd,
-    env,
-    timeout: opts.timeoutMs,
-    maxBuffer: 16 * 1024 * 1024,
-  });
+  let stdout = "";
+  let stderr = "";
+  try {
+    const result = await execFileAsync("bash", ["-c", bashCmd], {
+      cwd: opts.cwd,
+      env,
+      timeout: opts.timeoutMs,
+      maxBuffer: 16 * 1024 * 1024,
+    });
+    stdout = result.stdout;
+    stderr = result.stderr;
+  } catch (err) {
+    // execFile attaches stdout/stderr to the thrown error so partial output
+    // is recoverable for logging even when the process timed out or exited
+    // non-zero.
+    const e = err as Error & { stdout?: string; stderr?: string };
+    if (typeof e.stdout === "string") stdout = e.stdout;
+    if (typeof e.stderr === "string") stderr = e.stderr;
+    if (opts.logFile) {
+      await appendJobLog(opts.logFile, opts.cwd, opts.label, stdout, stderr, "FAILED");
+    }
+    throw err;
+  }
 
   if (opts.logFile) {
-    const logPath = isAbsolute(opts.logFile) ? opts.logFile : join(opts.cwd, opts.logFile);
-    const ts = new Date().toISOString();
-    const stamped = `\n--- ${ts} [${opts.label}] ---\n${stdout}${stderr ? `\nSTDERR:\n${stderr}` : ""}`;
-    try {
-      await appendFile(logPath, stamped, "utf-8");
-    } catch {
-      // logFile dir may not exist or be writable — non-fatal
-    }
+    await appendJobLog(opts.logFile, opts.cwd, opts.label, stdout, stderr, "OK");
   }
 
   const tail = stdout.trim().split("\n").slice(-3).join(" | ");
@@ -303,7 +339,7 @@ export async function startExternalJobsWatcher(
   const reloadMutex = new AsyncMutex();
   let registered = new Map<string, JobSpec>(); // name → spec
   let watcher: FSWatcher | null = null;
-  const debounceTimers = new Map<string, NodeJS.Timeout>();
+  let pendingTimer: NodeJS.Timeout | null = null;
   let closed = false;
 
   async function reload(): Promise<void> {
@@ -341,20 +377,16 @@ export async function startExternalJobsWatcher(
     });
   }
 
-  // Single debounce slot — multi-file edits coalesce into one rescan.
-  // Per-file debouncing would re-scan the whole directory N times for N
-  // simultaneous changes, which is wasted work since reload() is whole-dir.
-  const DEBOUNCE_KEY = "_all_";
-  function scheduleReload(_filename: string | null): void {
-    const existing = debounceTimers.get(DEBOUNCE_KEY);
-    if (existing) clearTimeout(existing);
-    const timer = setTimeout(() => {
-      debounceTimers.delete(DEBOUNCE_KEY);
+  // Single coalesced debounce — multi-file edits roll up into one rescan,
+  // since reload() is always whole-directory anyway.
+  function scheduleReload(): void {
+    if (pendingTimer) clearTimeout(pendingTimer);
+    pendingTimer = setTimeout(() => {
+      pendingTimer = null;
       reload().catch((err) => {
         console.error(`[external-jobs] reload failed:`, err);
       });
     }, RELOAD_DEBOUNCE_MS);
-    debounceTimers.set(DEBOUNCE_KEY, timer);
   }
 
   // Initial load — surface fatal errors to caller (e.g., dir read perms).
@@ -364,7 +396,7 @@ export async function startExternalJobsWatcher(
     try {
       watcher = fsWatch(dir, { persistent: false }, (_eventType, filename) => {
         if (filename && !filename.endsWith(".json")) return;
-        scheduleReload(filename);
+        scheduleReload();
       });
     } catch (err) {
       // Watching is a nice-to-have; daemon continues with the initial load.
@@ -375,9 +407,13 @@ export async function startExternalJobsWatcher(
   return {
     close: async () => {
       closed = true;
-      for (const t of debounceTimers.values()) clearTimeout(t);
-      debounceTimers.clear();
+      // Stop the watcher FIRST so no new events can race with timer cleanup.
       watcher?.close();
+      watcher = null;
+      if (pendingTimer) {
+        clearTimeout(pendingTimer);
+        pendingTimer = null;
+      }
       // Wait for any in-flight reload to finish.
       await reloadMutex.run(async () => {});
     },

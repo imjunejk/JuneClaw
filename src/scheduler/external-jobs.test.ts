@@ -212,6 +212,35 @@ describe("executeJobSpec", () => {
     expect(calls).toHaveLength(1); // post never ran
   });
 
+  it("appends partial output to logFile even when the command fails", async () => {
+    const { readFileSync } = await import("node:fs");
+    const logPath = join(tmpDir, "job.log");
+    setExecFileFailure("timeout", "stderr from failed run");
+    const spec = JobSpecSchema.parse({
+      ...validSpec,
+      cwd: tmpDir, // must be absolute; tmpDir is fine
+      logFile: "job.log",
+    });
+    await expect(executeJobSpec(spec)).rejects.toThrow(/timeout/);
+    const written = readFileSync(logPath, "utf-8");
+    expect(written).toContain("[main] [FAILED]");
+    expect(written).toContain("stderr from failed run");
+  });
+
+  it("appends successful output to logFile with [OK] label", async () => {
+    const { readFileSync } = await import("node:fs");
+    const logPath = join(tmpDir, "ok.log");
+    const spec = JobSpecSchema.parse({
+      ...validSpec,
+      cwd: tmpDir,
+      logFile: "ok.log",
+    });
+    await executeJobSpec(spec);
+    const written = readFileSync(logPath, "utf-8");
+    expect(written).toContain("[main] [OK]");
+    expect(written).toContain("stdout-line-1");
+  });
+
   it("postCommand failure is non-fatal by default (matches original gwangsuAdvice semantics)", async () => {
     // Main succeeds, post fails — executeJobSpec must resolve (not throw)
     let callCount = 0;
