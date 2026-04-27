@@ -27,6 +27,10 @@ const MAX_BODY_SIZE = 1_000_000; // 1 MB
 // June 의 phone (config.channels.june.phone) 으로 iMessage 자동 전송.
 const SIGNUP_WEBHOOK_SECRET = process.env.JUNECLAW_SIGNUP_WEBHOOK_SECRET ?? "";
 
+// Magic link webhook — galleon.market 의 /api/login-request 가 단명 (10분) 로그인
+// 링크를 등록 사용자의 iMessage 로 보내라고 요청. 같은 HMAC 패턴 사용.
+const MAGIC_LINK_WEBHOOK_SECRET = process.env.JUNECLAW_MAGIC_LINK_WEBHOOK_SECRET ?? "";
+
 class BodyTooLargeError extends Error {
   constructor() {
     super("Request body exceeds 1MB limit");
@@ -213,16 +217,20 @@ async function readRawBody(req: IncomingMessage): Promise<string> {
 }
 
 /**
- * Signup webhook HMAC 검증 — pure 함수 (테스트 가능).
+ * Webhook HMAC 검증 — pure 함수 (테스트 가능).
  *
  * Minor #1: Array.isArray guard — 이론상 string[] 가능 (Node parser 가 보통
  *   comma-join 하지만 명시적으로 처리).
  * Minor #2: Buffer.from(hex, "hex") 로 명시적 hex 디코딩 (UTF-8 default 보다
  *   idiomatic + malformed hex early reject).
  *
+ * 사용처:
+ *   - /webhook/signup-request (SIGNUP_WEBHOOK_SECRET)
+ *   - /webhook/magic-link-send (MAGIC_LINK_WEBHOOK_SECRET)
+ *
  * @returns true 면 유효, false 면 거절
  */
-export function verifySignupSignature(
+export function verifyHmacSignature(
   rawBody: string,
   providedHeader: string | string[] | undefined,
   secret: string,
@@ -252,6 +260,9 @@ export function verifySignupSignature(
   }
 }
 
+/** Backward-compat alias — 기존 import 깨짐 방지. */
+export const verifySignupSignature = verifyHmacSignature;
+
 routes.set("POST /webhook/signup-request", async (req, res) => {
   // Minor #3: SECRET 미설정 시 404 — endpoint 존재 자체 미노출 (이전 503 대비 tighter).
   if (!SIGNUP_WEBHOOK_SECRET) {
@@ -269,7 +280,7 @@ routes.set("POST /webhook/signup-request", async (req, res) => {
     return json(res, 500, { error: err instanceof Error ? err.message : String(err) });
   }
 
-  if (!verifySignupSignature(raw, req.headers["x-signature"], SIGNUP_WEBHOOK_SECRET)) {
+  if (!verifyHmacSignature(raw, req.headers["x-signature"], SIGNUP_WEBHOOK_SECRET)) {
     return json(res, 401, { error: "invalid signature" });
   }
 
@@ -302,6 +313,73 @@ routes.set("POST /webhook/signup-request", async (req, res) => {
   try {
     await context.sendToPhone(config.channels.june.phone, text);
     // Minor #4: PII echo 제거 — masked phone 도 식별 정보. 단순 ok.
+    json(res, 200, { ok: true });
+  } catch (err) {
+    json(res, 500, { error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+// ─── Magic link 발송 webhook ──────────────────────────────
+// galleon.market /api/login-request → 등록된 사용자에게 단명 (10분) 로그인
+// 링크를 그 사용자의 phone/email iMessage 로 발송. signup-request 와 같은
+// HMAC 패턴 — 다른 secret 만 사용.
+//
+// Body: {identifier, kind, display, magic_link, ttl_min, requested_at}
+// → identifier 로 sendToPhone → 메시지에 magic_link 포함
+//
+// 미설정 시 404 (signup-request 와 동일 정책 — endpoint 노출 회피).
+routes.set("POST /webhook/magic-link-send", async (req, res) => {
+  if (!MAGIC_LINK_WEBHOOK_SECRET) {
+    return json(res, 404, { error: "Not found" });
+  }
+  if (!context.sendToPhone) {
+    return json(res, 503, { error: "sendToPhone not wired" });
+  }
+
+  let raw: string;
+  try {
+    raw = await readRawBody(req);
+  } catch (err) {
+    if (handleBodyError(res, err)) return;
+    return json(res, 500, { error: err instanceof Error ? err.message : String(err) });
+  }
+
+  if (!verifyHmacSignature(raw, req.headers["x-signature"], MAGIC_LINK_WEBHOOK_SECRET)) {
+    return json(res, 401, { error: "invalid signature" });
+  }
+
+  let body: Record<string, unknown>;
+  try {
+    body = raw ? JSON.parse(raw) : {};
+  } catch (err) {
+    return json(res, 400, { error: `Invalid JSON: ${err instanceof Error ? err.message : String(err)}` });
+  }
+
+  const identifier = String(body.identifier ?? "").slice(0, 80);
+  const kind = String(body.kind ?? "").slice(0, 10);
+  const display = String(body.display ?? identifier).slice(0, 80);
+  const magicLink = String(body.magic_link ?? "").slice(0, 500);
+  const ttlMin = Number(body.ttl_min ?? 10);
+
+  if (!identifier) return json(res, 400, { error: "missing identifier" });
+  if (!magicLink) return json(res, 400, { error: "missing magic_link" });
+  // magic_link 는 https 로만 허용 — http 로 신원 도용 위험 차단
+  if (!magicLink.startsWith("https://")) {
+    return json(res, 400, { error: "magic_link must be https" });
+  }
+
+  // identifier 가 phone 이면 +1XXX 그대로, email 도 imsg 가 알아서 처리.
+  const text = [
+    "🔐 갈레온 로그인 링크",
+    `${kind === "email" ? "✉️" : "📱"} ${display}`,
+    "",
+    magicLink,
+    "",
+    `(${ttlMin}분 안에 탭 — 만료 시 다시 요청해주세요)`,
+  ].join("\n");
+
+  try {
+    await context.sendToPhone(identifier, text);
     json(res, 200, { ok: true });
   } catch (err) {
     json(res, 500, { error: err instanceof Error ? err.message : String(err) });
