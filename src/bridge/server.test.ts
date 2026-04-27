@@ -22,11 +22,14 @@ function magicSig(rawBody: string, tsSec?: number): { sig: string; ts: string } 
   return { sig, ts };
 }
 
-/** Magic webhook 의 표준 헤더 빌드 — 모든 테스트 helper. */
+/** Magic webhook 의 표준 헤더 빌드 — 모든 테스트 helper.
+ *  Connection: close — undici keep-alive 가 server.close 사이클과 충돌해 CI 에서
+ *  간헐적 SocketError 를 일으킴. 명시적으로 비활성화. */
 function magicHeaders(rawBody: string, tsSec?: number): Record<string, string> {
   const { sig, ts } = magicSig(rawBody, tsSec);
   return {
     "Content-Type": "application/json",
+    "Connection": "close",
     "x-signature": sig,
     "x-timestamp": ts,
   };
