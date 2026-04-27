@@ -1,2 +1,2 @@
-- [시스템 구조](project_gwangsu_system.md) — JuneClaw + gwangsu/algo, 육사 전략
+- [시스템 구조](project_gwangsu_system.md) — JuneClaw + gwangsu/algo, 동적 5단계 V8 전략
 - [Claude CLI 규칙](feedback_claude_cli.md) — 리모트 컨트롤 열기, tmux send-keys

@@ -10,8 +10,18 @@ jc rc               # claude --dangerously-skip-permissions + /remote-control (t
 ```
 데몬이 RC를 유지하지 않음. 필요할 때만 이 명령으로 수동 오픈.
 
-## 육사 전략 (AgiTQ 60% + SEPA 40%)
-- AgiTQ: TQQQ 200일선 3구간 (하락→SGOV / 집중투자→TQQQ 2일확인 / 과열→SPY)
-- SEPA: TT 8/8 + VCP v2.0, QQQ 기반 단계적 마진
+## 사륙 V8 전략 (동적 5단계 Inverse Safety)
+SoT: `portfolio_manager.py:62-77` `SEPA_WEIGHT_BY_DAYS`. 백테스트: CAGR 38.9% | Sharpe 1.452 | MDD -30.6%
+
+QQQ 200SMA 연속 상회일수 기반:
+- 10일+ → AgiTQ 15% / SEPA 85% (공격)
+- 5일+  → AgiTQ 20% / SEPA 80%
+- 3일+  → AgiTQ 30% / SEPA 70%
+- 2일+  → AgiTQ 40% / SEPA 60%
+- 1일/BEAR → AgiTQ 50% / SEPA 50% (SGOV 피난)
+
+- AgiTQ: TQQQ 200SMA 2일확인 + BTC 필터 + VIX 필터 (25/35) + 익절 20%
+- SEPA V8: TT 8/8 + 점수가중 + 섹터분산 + 품질필터 + Chandelier + Ratchet
 - 매매: portfolio_manager.py 유일한 매매 주체
-- 크론: 06:25/06:35 SEPA | 12:50/12:57/13:02 AgiTQ | 월 06:20 리밸런싱
+- CB: WARN -5% / HALT -7% / EMERG -10% (마진 1.10/1.05/1.02)
+- 크론: 06:15 SEPA scan / 06:31 alert / 12:55 sepa-check / 12:57 AgiTQ / 12:58 sepa-execute / 13:02 followup | 월 06:20 리밸런싱
