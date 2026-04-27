@@ -3,6 +3,12 @@ import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+// Hoisted state lets the vi.mock factory and tests share a single ref
+// to the captured fs.watch listener.
+const { watchListeners } = vi.hoisted(() => ({
+  watchListeners: [] as Array<(eventType: string, filename: string | null) => void>,
+}));
+
 // Mock child_process so we never spawn real bash.
 // Note: external-jobs.ts wraps execFile with util.promisify. Our mock doesn't
 // have the [promisify.custom] symbol that Node's real execFile carries, so
@@ -11,6 +17,24 @@ import { join } from "node:path";
 vi.mock("node:child_process", () => ({
   execFile: vi.fn(),
 }));
+
+// Mock node:fs to intercept `watch`. Other fs APIs (existsSync, etc.) keep
+// their real implementations so loadAllExternalJobs can read the tmpdir.
+vi.mock("node:fs", async () => {
+  const actual = await vi.importActual<typeof import("node:fs")>("node:fs");
+  return {
+    ...actual,
+    watch: (..._args: unknown[]) => {
+      // node:fs.watch supports both (path, listener) and (path, opts, listener) — the
+      // listener is always the last function argument.
+      const last = _args[_args.length - 1];
+      if (typeof last === "function") {
+        watchListeners.push(last as (e: string, f: string | null) => void);
+      }
+      return { close: () => {} };
+    },
+  };
+});
 
 // Mock event emitter + system log so tests don't touch disk.
 vi.mock("../hooks/events.js", () => ({
@@ -28,6 +52,7 @@ import {
   JobSpecSchema,
 } from "./external-jobs.js";
 import { execFile } from "node:child_process";
+import { emit } from "../hooks/events.js";
 
 const validSpec = {
   name: "test-job",
@@ -58,6 +83,7 @@ function setExecFileFailure(message = "main failed", stderr = "boom"): void {
 beforeEach(() => {
   tmpDir = mkdtempSync(join(tmpdir(), "juneclaw-jobs-"));
   vi.clearAllMocks();
+  watchListeners.length = 0;
   setExecFileSuccess();
 });
 
@@ -301,6 +327,47 @@ describe("buildBashCommand quoting", () => {
     const args = (execFile as unknown as { mock: { calls: [unknown, unknown[]][] } }).mock.calls[0]![1] as string[];
     // 'it'\''s fine' is the safe form
     expect(args[1]).toContain(`'it'\\''s fine'`);
+  });
+});
+
+describe("fs.watch integration", () => {
+  // Uses real timers — fake timers don't synchronize with libuv's fs thread
+  // pool callbacks that the reload triggers.
+  it("debounces fs.watch events into a single coalesced reload", async () => {
+    writeFileSync(join(tmpDir, "a.json"), JSON.stringify({ jobs: [{ ...validSpec, name: "a-job" }] }));
+
+    const addJob = vi.fn();
+    const removeJob = vi.fn();
+    const handle = await startExternalJobsWatcher(tmpDir, { addJob, removeJob });
+    expect(addJob).toHaveBeenCalledTimes(1); // initial load
+    expect(watchListeners.length).toBe(1); // watcher attached
+
+    // Add a second spec file, then fire several watch events in quick
+    // succession. Per-filename debouncing would re-scan twice; the
+    // single-key implementation must coalesce into one reload.
+    writeFileSync(join(tmpDir, "b.json"), JSON.stringify({ jobs: [{ ...validSpec, name: "b-job" }] }));
+    const listener = watchListeners[0]!;
+    listener("change", "a.json");
+    listener("change", "b.json");
+    listener("rename", "b.json");
+
+    // Wait past 200ms debounce + a small margin for async I/O completion.
+    await new Promise((r) => setTimeout(r, 350));
+
+    // Reload re-binds every spec (a-job still there + b-job new) → +2 addJob calls
+    expect(addJob).toHaveBeenCalledTimes(3);
+    expect(handle.registered()).toEqual(["a-job", "b-job"]);
+
+    await handle.close();
+  });
+});
+
+describe("emit failure resilience", () => {
+  it("does not turn a successful job into a failure when emit() throws", async () => {
+    (emit as unknown as ReturnType<typeof vi.fn>).mockRejectedValue(new Error("hook handler exploded"));
+    const spec = JobSpecSchema.parse(validSpec);
+    // Main exec succeeds (default mock), emit throws — executeJobSpec should still resolve.
+    await expect(executeJobSpec(spec)).resolves.toBeUndefined();
   });
 });
 

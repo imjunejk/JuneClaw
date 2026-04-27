@@ -195,13 +195,22 @@ async function runCommand(opts: {
   return { tail, stderrPreview };
 }
 
+/** Fire-and-forget emit so a hook handler failure can't poison the job result. */
+async function safeEmit(event: "cron:started" | "cron:completed" | "cron:failed", payload: { job: string; error?: string }): Promise<void> {
+  try {
+    await emit(event, payload);
+  } catch (err) {
+    console.warn(`[external-jobs] emit("${event}") failed:`, err instanceof Error ? err.message : String(err));
+  }
+}
+
 /**
  * Execute a job spec end-to-end: main command, then postCommand on success.
  * Failures throw so the cron scheduler's circuit breaker counts them.
  */
 export async function executeJobSpec(spec: JobSpec): Promise<void> {
   const startedAt = Date.now();
-  await emit("cron:started", { job: spec.name });
+  await safeEmit("cron:started", { job: spec.name });
 
   try {
     const main = await runCommand({
@@ -250,12 +259,12 @@ export async function executeJobSpec(spec: JobSpec): Promise<void> {
     }
 
     const elapsedMs = Date.now() - startedAt;
-    await emit("cron:completed", { job: spec.name });
+    await safeEmit("cron:completed", { job: spec.name });
     console.log(`[external-job] "${spec.name}" finished in ${elapsedMs}ms`);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     await appendSystemLog(`external-job "${spec.name}" failed: ${msg.slice(0, 300)}`);
-    await emit("cron:failed", { job: spec.name, error: msg });
+    await safeEmit("cron:failed", { job: spec.name, error: msg });
     throw err;
   }
 }
@@ -311,14 +320,11 @@ export async function startExternalJobsWatcher(
         }
       }
 
-      // Add or replace
+      // Add or replace every spec — addJob is idempotent (cron.ts:addJob calls
+      // removeJob internally), so re-binding even unchanged schedules just
+      // refreshes the closure's captured `spec` (command/env may have changed
+      // even when schedule did not).
       for (const [name, spec] of next) {
-        const prev = registered.get(name);
-        if (prev && prev.schedule === spec.schedule) {
-          // schedule unchanged — still re-bind so the closure captures the
-          // latest spec (command/env may have changed). addJob's removeJob
-          // upfront makes this a no-op when called twice.
-        }
         deps.addJob(name, spec.schedule, () => executeJobSpec(spec));
       }
 
@@ -335,17 +341,20 @@ export async function startExternalJobsWatcher(
     });
   }
 
-  function scheduleReload(filename: string | null): void {
-    const key = filename ?? "_dir_";
-    const existing = debounceTimers.get(key);
+  // Single debounce slot — multi-file edits coalesce into one rescan.
+  // Per-file debouncing would re-scan the whole directory N times for N
+  // simultaneous changes, which is wasted work since reload() is whole-dir.
+  const DEBOUNCE_KEY = "_all_";
+  function scheduleReload(_filename: string | null): void {
+    const existing = debounceTimers.get(DEBOUNCE_KEY);
     if (existing) clearTimeout(existing);
     const timer = setTimeout(() => {
-      debounceTimers.delete(key);
+      debounceTimers.delete(DEBOUNCE_KEY);
       reload().catch((err) => {
         console.error(`[external-jobs] reload failed:`, err);
       });
     }, RELOAD_DEBOUNCE_MS);
-    debounceTimers.set(key, timer);
+    debounceTimers.set(DEBOUNCE_KEY, timer);
   }
 
   // Initial load — surface fatal errors to caller (e.g., dir read perms).
