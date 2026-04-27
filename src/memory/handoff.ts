@@ -6,14 +6,31 @@ import { runClaude, type RunResult } from "../agent/runner.js";
 // ── System Context (항상 핸드오프에 포함) ──────────────────
 const SYSTEM_CONTEXT = `
 ## System Context (광수 트레이딩 시스템)
-육사 전략 = AgiTQ 60% + SEPA 40%
-- AgiTQ: TQQQ 200일선 3구간 (하락→SGOV / 집중투자→TQQQ 2일확인 / 과열→SPY)
-- SEPA: TT 8/8 개별주식 + ETF, VCP v2.0, -10% 스탑
+사륙 V8 = 동적 5단계 Inverse Safety. SoT: \`gwangsu/algo/strategies/portfolio_manager.py:62-77\` SEPA_WEIGHT_BY_DAYS.
+백테스트 베이스라인 (174종목): CAGR 38.9% | Sharpe 1.452 | MDD -30.6%
+
+QQQ 200SMA 연속 상회일수 기반 비중 자동 조절:
+- 10일+ → AgiTQ 15% / SEPA 85% (FULL_BULL, 공격)
+- 5일+  → AgiTQ 20% / SEPA 80% (BULL_STRONG)
+- 3일+  → AgiTQ 30% / SEPA 70% (BULL_WEAK)
+- 2일+  → AgiTQ 40% / SEPA 60% (CAUTION)
+- 1일/BEAR → AgiTQ 50% / SEPA 50% (EARLY/BEAR, SGOV 피난)
+폴백: AgiTQ 20% / SEPA 80%. 드리프트 5%p 초과 시 월요일 리밸런싱.
+
+- AgiTQ: TQQQ 200SMA 2일확인 + BTC 200SMA 필터 + VIX 필터 (25 사이즈 50%, 35 즉시 퇴출), 익절 20%
+- SEPA V8: TT 8/8 + 6가지 개선 통합
+  1) 점수가중 포지션 사이징 (핵심 혁신, +32% CAGR)
+  2) 섹터 분산 (max 2/섹터, 반도체 별도 버킷)
+  3) 품질필터 (일평균 거래대금 $50M+, 52주 고점 -25% 이내)
+  4) Chandelier Stop (고점 대비 -15%)
+  5) Profit Ratchet (+25% BE, +50% 이익 50% 락인)
+  6) TT 7+ 허용 (SEPA BREAKOUT 신호 있을 때만)
+  + -10% 하드 스탑
+- 리스크: 서킷브레이커 (WARN -5% / HALT -7% / EMERG -10%, 마진<1.10/1.05/1.02)
 - 매매는 portfolio_manager.py가 통합 관리 (유일한 매매 주체)
-- 크론 스케줄 (PT):
-  월 06:20 리밸런싱 | 06:25 SEPA 스캔+리밋 | 06:35 SEPA 체결확인
-  12:50 AgiTQ 준비 | 12:57 AgiTQ 실행(종가 3분전 market) | 13:02 AgiTQ followup(limit)
-- Alpaca 라이브 계좌, AGITQ_SYMBOLS: {TQQQ, SGOV, SPY}
+- 크론 (PT): 월 06:20 리밸런싱 | 06:15 sepa_radar scan | 06:31 sepa-scan 알림 |
+  12:50 check | 12:55 sepa-check (리밋) | 12:57 AgiTQ execute | 12:58 sepa-execute (market 전환) | 13:02 agitq-followup
+- Alpaca 라이브 계좌, AGITQ_SYMBOLS: {TQQQ, SGOV, SPY, QQQ}
 - 코드: /Users/jp/gwangsu/algo (GitHub: imjunejk/gwangsu)
 - JuneClaw: /Users/jp/JuneClaw
 `.trim();
