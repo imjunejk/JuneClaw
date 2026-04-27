@@ -17,7 +17,7 @@ import { existsSync, watch as fsWatch, type FSWatcher } from "node:fs";
 import { readdir, readFile, appendFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { dirname, isAbsolute, join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { z } from "zod";
 import { AsyncMutex } from "../lib/async-mutex.js";
 import { emit } from "../hooks/events.js";
@@ -50,6 +50,13 @@ const JobSpecSchema = z.object({
   postCommandCwd: z.string().optional(),
   /** Hard kill for postCommand. Default 10 min. */
   postCommandTimeoutMs: z.number().int().positive().default(10 * 60_000),
+  /**
+   * If false (default), postCommand failure is logged but doesn't fail the
+   * job — useful when the post step is independent (e.g., a deploy that can
+   * retry next cycle). If true, postCommand failure throws and counts toward
+   * the cron circuit breaker, same as a main command failure.
+   */
+  postCommandFailIsFatal: z.boolean().default(false),
 });
 
 const JobSpecFileSchema = z.object({
@@ -212,20 +219,33 @@ export async function executeJobSpec(spec: JobSpec): Promise<void> {
     }
 
     if (spec.postCommand && spec.postCommand.length > 0) {
-      const post = await runCommand({
-        command: spec.postCommand,
-        cwd: spec.postCommandCwd ?? spec.cwd,
-        // postCommand inherits env from process — does NOT re-source envFile
-        // (different cwd typical, e.g., dashboard deploy script). Specify
-        // env on the spec if vars need to flow through.
-        env: spec.env,
-        timeoutMs: spec.postCommandTimeoutMs,
-        logFile: spec.logFile,
-        label: "post",
-      });
-      console.log(`[external-job] "${spec.name}" post: ${post.tail || "(no stdout)"}`);
-      if (post.stderrPreview) {
-        console.log(`[external-job] "${spec.name}" post stderr: ${post.stderrPreview}`);
+      try {
+        const post = await runCommand({
+          command: spec.postCommand,
+          cwd: spec.postCommandCwd ?? spec.cwd,
+          // postCommand inherits env from process — does NOT re-source envFile
+          // (different cwd typical, e.g., dashboard deploy script). Specify
+          // env on the spec if vars need to flow through.
+          env: spec.env,
+          timeoutMs: spec.postCommandTimeoutMs,
+          logFile: spec.logFile,
+          label: "post",
+        });
+        console.log(`[external-job] "${spec.name}" post: ${post.tail || "(no stdout)"}`);
+        if (post.stderrPreview) {
+          console.log(`[external-job] "${spec.name}" post stderr: ${post.stderrPreview}`);
+        }
+      } catch (postErr) {
+        // Default: postCommand failure does NOT fail the job (matches the
+        // original gwangsuAdvice semantics where deploy.sh failures were
+        // logged but the advice JSON was still considered successful).
+        // Set postCommandFailIsFatal: true on the spec to opt in to fatal.
+        const msg = postErr instanceof Error ? postErr.message : String(postErr);
+        if (spec.postCommandFailIsFatal) {
+          throw postErr;
+        }
+        console.error(`[external-job] "${spec.name}" post failed (non-fatal): ${msg.slice(0, 300)}`);
+        await appendSystemLog(`external-job "${spec.name}" postCommand failed (non-fatal): ${msg.slice(0, 300)}`);
       }
     }
 
@@ -359,7 +379,3 @@ export async function startExternalJobsWatcher(
 
 // Re-export schema for tests / external tooling.
 export { JobSpecSchema, JobSpecFileSchema };
-
-// dirname is imported for completeness — a future enhancement may resolve
-// command[0] relative to cwd if not absolute.
-void dirname;

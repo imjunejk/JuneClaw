@@ -185,6 +185,53 @@ describe("executeJobSpec", () => {
     const calls = (execFile as unknown as { mock: { calls: unknown[][] } }).mock.calls;
     expect(calls).toHaveLength(1); // post never ran
   });
+
+  it("postCommand failure is non-fatal by default (matches original gwangsuAdvice semantics)", async () => {
+    // Main succeeds, post fails — executeJobSpec must resolve (not throw)
+    let callCount = 0;
+    (execFile as unknown as ExecFileMock).mockImplementation(
+      (_bin: string, _args: string[], _opts: object, cb: (err: Error | null, value: { stdout: string; stderr: string }) => void) => {
+        callCount++;
+        if (callCount === 1) {
+          cb(null, { stdout: "advice generated", stderr: "" });
+        } else {
+          const err = new Error("deploy failed") as Error & { stdout?: string; stderr?: string };
+          err.stdout = "";
+          err.stderr = "wrangler error";
+          cb(err, { stdout: "", stderr: "wrangler error" });
+        }
+        return { kill: () => {} };
+      },
+    );
+    const spec = JobSpecSchema.parse({ ...validSpec, postCommand: ["bash", "deploy.sh"] });
+    await expect(executeJobSpec(spec)).resolves.toBeUndefined();
+    const calls = (execFile as unknown as { mock: { calls: unknown[][] } }).mock.calls;
+    expect(calls).toHaveLength(2); // both main + post ran
+  });
+
+  it("postCommand failure is fatal when postCommandFailIsFatal: true", async () => {
+    let callCount = 0;
+    (execFile as unknown as ExecFileMock).mockImplementation(
+      (_bin: string, _args: string[], _opts: object, cb: (err: Error | null, value: { stdout: string; stderr: string }) => void) => {
+        callCount++;
+        if (callCount === 1) {
+          cb(null, { stdout: "main ok", stderr: "" });
+        } else {
+          const err = new Error("post failed") as Error & { stdout?: string; stderr?: string };
+          err.stdout = "";
+          err.stderr = "boom";
+          cb(err, { stdout: "", stderr: "boom" });
+        }
+        return { kill: () => {} };
+      },
+    );
+    const spec = JobSpecSchema.parse({
+      ...validSpec,
+      postCommand: ["bash", "must-succeed.sh"],
+      postCommandFailIsFatal: true,
+    });
+    await expect(executeJobSpec(spec)).rejects.toThrow(/post failed/);
+  });
 });
 
 describe("startExternalJobsWatcher", () => {

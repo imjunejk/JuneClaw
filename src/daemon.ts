@@ -1120,7 +1120,9 @@ export async function startDaemon(): Promise<void> {
     await emit("daemon:shutdown", { signal });
     stopProgressMonitor();
     if (externalJobsHandle) {
-      await externalJobsHandle.close().catch(() => {});
+      await externalJobsHandle.close().catch((err) => {
+        logError("[external-jobs] watcher close failed during shutdown", err);
+      });
       externalJobsHandle = null;
     }
     stopAllCron();
