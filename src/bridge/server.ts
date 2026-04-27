@@ -260,8 +260,101 @@ export function verifyHmacSignature(
   }
 }
 
-/** Backward-compat alias — 기존 import 깨짐 방지. */
+/**
+ * Backward-compat alias for the original name.
+ *
+ * @deprecated Use {@link verifyHmacSignature} instead. Removed once external
+ * importers migrate (no in-tree consumers remain — kept for one release).
+ */
 export const verifySignupSignature = verifyHmacSignature;
+
+/** Magic link webhook 의 timestamped HMAC + replay window 검증.
+ *
+ * Sig 입력: `${ts}\n${rawBody}` (hex HMAC-SHA256).
+ * Replay 방어: x-timestamp 가 현재 시각 ±window 안이어야 함.
+ *   - 기본값: skewSec=300 (5분 전까지), futureSec=60 (1분 후까지)
+ *   - 시계 차이 + 네트워크 지연 + iMessage 처리 여유분
+ *
+ * @returns { ok: true } 또는 { ok: false, reason: 진단 코드 }
+ */
+export function verifyTimestampedHmacSignature(
+  rawBody: string,
+  sigHeader: string | string[] | undefined,
+  tsHeader: string | string[] | undefined,
+  secret: string,
+  opts: { skewSec?: number; futureSec?: number; nowSec?: number } = {},
+): { ok: true } | { ok: false; reason: string } {
+  if (!secret) return { ok: false, reason: "no_secret" };
+  if (Array.isArray(sigHeader)) return { ok: false, reason: "sig_array" };
+  if (Array.isArray(tsHeader)) return { ok: false, reason: "ts_array" };
+
+  const tsRaw = tsHeader ?? "";
+  if (!/^\d+$/.test(tsRaw)) return { ok: false, reason: "ts_format" };
+  const ts = Number(tsRaw);
+  if (!Number.isFinite(ts) || ts <= 0) return { ok: false, reason: "ts_invalid" };
+
+  const now = opts.nowSec ?? Math.floor(Date.now() / 1000);
+  const skew = opts.skewSec ?? 300;       // 5분 전까지 허용
+  const future = opts.futureSec ?? 60;    // 1분 후까지 허용
+  if (ts < now - skew) return { ok: false, reason: "ts_stale" };
+  if (ts > now + future) return { ok: false, reason: "ts_future" };
+
+  const sigInput = `${tsRaw}\n${rawBody}`;
+  const provided = sigHeader ?? "";
+  const expected = createHmac("sha256", secret).update(sigInput).digest("hex");
+  if (provided.length !== expected.length) return { ok: false, reason: "sig_len" };
+
+  let providedBuf: Buffer;
+  let expectedBuf: Buffer;
+  try {
+    providedBuf = Buffer.from(provided, "hex");
+    expectedBuf = Buffer.from(expected, "hex");
+  } catch {
+    return { ok: false, reason: "sig_hex" };
+  }
+  if (providedBuf.length !== expectedBuf.length || providedBuf.length === 0) {
+    return { ok: false, reason: "sig_buf" };
+  }
+  try {
+    return timingSafeEqual(providedBuf, expectedBuf)
+      ? { ok: true }
+      : { ok: false, reason: "sig_mismatch" };
+  } catch {
+    return { ok: false, reason: "sig_throw" };
+  }
+}
+
+// Magic link host allowlist — JuneClaw 가 발송하는 링크의 host 강제.
+// preview/임의 hostname 으로의 phishing 링크 차단 (HMAC 키 유출 시 방어선).
+const MAGIC_LINK_ALLOWED_HOSTS = new Set([
+  "galleon.market",
+  "www.galleon.market",
+  "galleon-market.pages.dev",
+]);
+
+function isAllowedMagicLinkUrl(rawUrl: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    return false;
+  }
+  if (url.protocol !== "https:") return false;
+  if (MAGIC_LINK_ALLOWED_HOSTS.has(url.hostname)) return true;
+  // CF Pages 의 hash-prefixed preview (예: abc123.galleon-market.pages.dev) 허용
+  return url.hostname.endsWith(".galleon-market.pages.dev");
+}
+
+// E.164 phone (e.g. +12139992143) 또는 basic email 검증.
+// daemon.sendToPhone 으로 가기 전 형식 강제 — HMAC 키 유출 후 임의 문자열 주입 방어.
+const E164_RE = /^\+[1-9]\d{6,14}$/;
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+function isValidIdentifier(identifier: string, kind: string): boolean {
+  if (kind === "phone") return E164_RE.test(identifier);
+  if (kind === "email") return EMAIL_RE.test(identifier);
+  return false;  // kind 가 phone/email 외이면 항상 거절
+}
 
 routes.set("POST /webhook/signup-request", async (req, res) => {
   // Minor #3: SECRET 미설정 시 404 — endpoint 존재 자체 미노출 (이전 503 대비 tighter).
@@ -344,8 +437,15 @@ routes.set("POST /webhook/magic-link-send", async (req, res) => {
     return json(res, 500, { error: err instanceof Error ? err.message : String(err) });
   }
 
-  if (!verifyHmacSignature(raw, req.headers["x-signature"], MAGIC_LINK_WEBHOOK_SECRET)) {
-    return json(res, 401, { error: "invalid signature" });
+  // Timestamped HMAC + ±5분 replay window — 캡처된 요청 재전송 차단.
+  const sigCheck = verifyTimestampedHmacSignature(
+    raw,
+    req.headers["x-signature"],
+    req.headers["x-timestamp"],
+    MAGIC_LINK_WEBHOOK_SECRET,
+  );
+  if (!sigCheck.ok) {
+    return json(res, 401, { error: "invalid signature", reason: sigCheck.reason });
   }
 
   let body: Record<string, unknown>;
@@ -359,16 +459,27 @@ routes.set("POST /webhook/magic-link-send", async (req, res) => {
   const kind = String(body.kind ?? "").slice(0, 10);
   const display = String(body.display ?? identifier).slice(0, 80);
   const magicLink = String(body.magic_link ?? "").slice(0, 500);
-  const ttlMin = Number(body.ttl_min ?? 10);
+  const ttlMinRaw = body.ttl_min;
+  const ttlMin = Number(ttlMinRaw ?? 10);
 
   if (!identifier) return json(res, 400, { error: "missing identifier" });
   if (!magicLink) return json(res, 400, { error: "missing magic_link" });
-  // magic_link 는 https 로만 허용 — http 로 신원 도용 위험 차단
-  if (!magicLink.startsWith("https://")) {
-    return json(res, 400, { error: "magic_link must be https" });
+
+  // ttl_min 은 1..60 정수 (NaN/음수/거대값 거절)
+  if (!Number.isFinite(ttlMin) || ttlMin <= 0 || ttlMin > 60) {
+    return json(res, 400, { error: "ttl_min out of range (1..60)" });
   }
 
-  // identifier 가 phone 이면 +1XXX 그대로, email 도 imsg 가 알아서 처리.
+  // identifier 형식 강제 — daemon.sendToPhone 에 임의 문자열 주입 차단
+  if (!isValidIdentifier(identifier, kind)) {
+    return json(res, 400, { error: "invalid identifier format for kind" });
+  }
+
+  // magic_link host allowlist — galleon.market 외 도메인으로의 phishing 차단
+  if (!isAllowedMagicLinkUrl(magicLink)) {
+    return json(res, 400, { error: "magic_link host not allowed" });
+  }
+
   const text = [
     "🔐 갈레온 로그인 링크",
     `${kind === "email" ? "✉️" : "📱"} ${display}`,
@@ -382,7 +493,8 @@ routes.set("POST /webhook/magic-link-send", async (req, res) => {
     await context.sendToPhone(identifier, text);
     json(res, 200, { ok: true });
   } catch (err) {
-    json(res, 500, { error: err instanceof Error ? err.message : String(err) });
+    // sendToPhone 에러 메시지에 magic_link 가 포함되지 않도록 — 일반화된 메시지만 노출
+    json(res, 500, { error: "send failed" });
   }
 });
 
