@@ -14,10 +14,10 @@
  */
 
 import { existsSync, watch as fsWatch, type FSWatcher } from "node:fs";
-import { readdir, readFile, appendFile } from "node:fs/promises";
+import { readdir, readFile, appendFile, mkdir } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { z } from "zod";
 import { AsyncMutex } from "../lib/async-mutex.js";
 import { emit } from "../hooks/events.js";
@@ -159,7 +159,9 @@ function buildBashCommand(
 
 /**
  * Append captured output to a job's log file. Best-effort — write failures
- * (missing dir, permissions) are swallowed since the cron path can't recover.
+ * (permissions, disk full) are swallowed since the cron path can't recover.
+ * The parent directory is created on demand so a job spec can point at a
+ * fresh path without separate setup.
  */
 async function appendJobLog(
   logFile: string,
@@ -173,9 +175,10 @@ async function appendJobLog(
   const ts = new Date().toISOString();
   const stamped = `\n--- ${ts} [${label}] [${status}] ---\n${stdout}${stderr ? `\nSTDERR:\n${stderr}` : ""}`;
   try {
-    await appendFile(logPath, stamped, "utf-8");
+    await mkdir(dirname(logPath), { recursive: true });
+    await appendFile(logPath, stamped, { encoding: "utf-8" });
   } catch {
-    // logFile dir may not exist or be writable — non-fatal
+    // mkdir / append failed — non-fatal
   }
 }
 

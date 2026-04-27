@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -213,8 +213,7 @@ describe("executeJobSpec", () => {
   });
 
   it("appends partial output to logFile even when the command fails", async () => {
-    const { readFileSync } = await import("node:fs");
-    const logPath = join(tmpDir, "job.log");
+const logPath = join(tmpDir, "job.log");
     setExecFileFailure("timeout", "stderr from failed run");
     const spec = JobSpecSchema.parse({
       ...validSpec,
@@ -228,7 +227,6 @@ describe("executeJobSpec", () => {
   });
 
   it("appends successful output to logFile with [OK] label", async () => {
-    const { readFileSync } = await import("node:fs");
     const logPath = join(tmpDir, "ok.log");
     const spec = JobSpecSchema.parse({
       ...validSpec,
@@ -239,6 +237,19 @@ describe("executeJobSpec", () => {
     const written = readFileSync(logPath, "utf-8");
     expect(written).toContain("[main] [OK]");
     expect(written).toContain("stdout-line-1");
+  });
+
+  it("auto-creates the logFile parent directory if missing", async () => {
+    const nestedDir = join(tmpDir, "deep", "nested");
+    const logPath = join(nestedDir, "job.log");
+    const spec = JobSpecSchema.parse({
+      ...validSpec,
+      cwd: tmpDir,
+      logFile: join("deep", "nested", "job.log"),
+    });
+    await executeJobSpec(spec);
+    const written = readFileSync(logPath, "utf-8");
+    expect(written).toContain("[main] [OK]");
   });
 
   it("postCommand failure is non-fatal by default (matches original gwangsuAdvice semantics)", async () => {
