@@ -58,7 +58,9 @@ export function spawnClaudePrint(
       if (settled) return;
       settled = true;
       if (code !== 0) {
-        reject(new Error(`claude --print exited ${code}: ${stderr.slice(0, 500)}`));
+        // claude CLI prints model/auth errors to stdout, not stderr — include both.
+        const detail = (stderr.trim() || stdout.trim() || "(no output)").slice(0, 500);
+        reject(new Error(`claude --print exited ${code}: ${detail}`));
       } else {
         resolve(stdout);
       }

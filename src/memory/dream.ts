@@ -24,13 +24,16 @@ import {
   computeMetricsFromSignals,
   appendMetrics,
   type SessionMetrics,
-  type MetricsSnapshot,
 } from "./metrics-ledger.js";
 
 export interface DreamState {
   lastDreamAt: string | null;  // ISO timestamp
   sessionsSinceDream: number;
   totalDreams: number;
+  /** Consecutive failures of runDream (Claude spawn errors etc.) — resets on success. */
+  consecutiveFailures?: number;
+  /** ISO timestamp of last failure, used to gate retries via exponential backoff. */
+  lastFailureAt?: string | null;
   /** Hill-climbing: pending evaluation from the most recent dream */
   pendingEvaluation?: {
     dreamNumber: number;
@@ -40,12 +43,17 @@ export interface DreamState {
   };
 }
 
+/** After 3 consecutive failures, back off; after 6, back off harder. */
+const FAILURE_BACKOFF_MINUTES = [0, 0, 0, 60, 120, 240, 480];
+
 const dreamMutex = new AsyncMutex();
 
 const DEFAULT_STATE: DreamState = {
   lastDreamAt: null,
   sessionsSinceDream: 0,
   totalDreams: 0,
+  consecutiveFailures: 0,
+  lastFailureAt: null,
 };
 
 export async function loadDreamState(): Promise<DreamState> {
@@ -56,6 +64,8 @@ export async function loadDreamState(): Promise<DreamState> {
       lastDreamAt: parsed.lastDreamAt ?? null,
       sessionsSinceDream: parsed.sessionsSinceDream ?? 0,
       totalDreams: parsed.totalDreams ?? 0,
+      consecutiveFailures: parsed.consecutiveFailures ?? 0,
+      lastFailureAt: parsed.lastFailureAt ?? null,
       pendingEvaluation: parsed.pendingEvaluation,
     };
   } catch {
@@ -77,6 +87,18 @@ export async function incrementSessionCount(): Promise<void> {
 
 export function shouldDream(state: DreamState): boolean {
   if (state.sessionsSinceDream < config.dream.minSessionsSinceLast) return false;
+
+  // Failure backoff: after consecutive failures, wait before retrying so a broken
+  // Claude CLI / model config doesn't cause a 10-minute retry storm.
+  const failures = state.consecutiveFailures ?? 0;
+  if (failures > 0 && state.lastFailureAt) {
+    const idx = Math.min(failures, FAILURE_BACKOFF_MINUTES.length - 1);
+    const backoffMs = FAILURE_BACKOFF_MINUTES[idx]! * 60 * 1000;
+    if (backoffMs > 0) {
+      const sinceFailure = Date.now() - new Date(state.lastFailureAt).getTime();
+      if (sinceFailure < backoffMs) return false;
+    }
+  }
 
   if (!state.lastDreamAt) return true;
 
@@ -244,6 +266,35 @@ export async function runDream(): Promise<void> {
     console.log("[dream] starting autoDream consolidation...");
     await appendSystemLog("autoDream: starting consolidation cycle");
 
+    try {
+      await runDreamInner(state, nowMs);
+      // success — reset failure counter
+      if ((state.consecutiveFailures ?? 0) > 0) {
+        state.consecutiveFailures = 0;
+        state.lastFailureAt = null;
+        await saveDreamState(state);
+      }
+    } catch (err) {
+      const failures = (state.consecutiveFailures ?? 0) + 1;
+      state.consecutiveFailures = failures;
+      state.lastFailureAt = new Date().toISOString();
+      await saveDreamState(state);
+      const msg = err instanceof Error ? err.message : String(err);
+      await appendSystemLog(
+        `autoDream: FAILED (#${failures} consecutive) — ${msg.slice(0, 300)}`,
+      );
+      const idx = Math.min(failures, FAILURE_BACKOFF_MINUTES.length - 1);
+      const backoffMin = FAILURE_BACKOFF_MINUTES[idx]!;
+      if (backoffMin > 0) {
+        console.log(`[dream] backoff: skipping retries for ${backoffMin} min`);
+      }
+      throw err;
+    }
+  });
+}
+
+async function runDreamInner(state: DreamState, nowMs: number): Promise<void> {
+
     // ── Hill-climbing: evaluate previous dream's changes ──
     await evaluatePendingExperiment(state);
 
@@ -356,10 +407,17 @@ Start directly with the markdown content.`;
       updatedRules = dreamOutput.trim() + "\n";
     }
 
-    // 5. Save pre-dream state for hill-climbing evaluation
     const hc = config.dream.hillClimbing;
     const nextDreamNumber = state.totalDreams + 1;
 
+    // 5. Write updated master-rules.md FIRST so pendingEvaluation only gets set
+    // for dreams that actually applied. If this throws, outer catch records a
+    // failure without leaving a stale pendingEvaluation pointing at content
+    // that was never written.
+    const rulesPath = join(config.workspace, "memory", "lessons", "master-rules.md");
+    await atomicWriteFile(rulesPath, updatedRules);
+
+    // 6. Save pre-dream state for hill-climbing evaluation (post-write)
     if (hc.enabled && useZones) {
       const previousMutable = extractMutableZone(currentRules, "dream-insights") ?? "";
 
@@ -373,10 +431,6 @@ Start directly with the markdown content.`;
         evaluateAfterDate: evalDate.toISOString().split("T")[0]!,
       };
     }
-
-    // 6. Write updated master-rules.md
-    const rulesPath = join(config.workspace, "memory", "lessons", "master-rules.md");
-    await atomicWriteFile(rulesPath, updatedRules);
 
     // 7. Log metrics snapshot
     await appendMetrics({
@@ -399,5 +453,4 @@ Start directly with the markdown content.`;
     const logMsg = `autoDream: consolidation #${nextDreamNumber} completed — master-rules.md updated (${updatedRules.length} chars, ${useZones ? "zone-aware" : "legacy"} mode, success rate: ${(currentMetrics.successRate * 100).toFixed(1)}%)`;
     console.log(`[dream] ${logMsg}`);
     await appendSystemLog(logMsg);
-  });
 }

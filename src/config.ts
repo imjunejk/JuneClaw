@@ -56,7 +56,7 @@ export const config = {
   dream: {
     minHoursSinceLast: 24,
     minSessionsSinceLast: 5,
-    model: "claude-sonnet-4-7",
+    model: "claude-opus-4-7",
     timeoutMs: 120_000,
     hillClimbing: {
       enabled: true,

@@ -863,12 +863,18 @@ async function runHeartbeat(
       }
     }
 
-    // autoDream: check if memory consolidation should run
+    // autoDream: check if memory consolidation should run.
+    // Strategy tuner runs whether or not dream succeeds — they share Claude CLI
+    // (so often co-fail) but tuner is independently useful and shouldn't be
+    // gated on dream's success.
     if (shouldDream(dreamState)) {
       log("[dream] trigger conditions met, starting autoDream...");
-      await runDream();
+      try {
+        await runDream();
+      } catch (dreamErr) {
+        logError("[dream] runDream failed", dreamErr);
+      }
 
-      // Run strategy tuner after dream consolidation
       log("[tuner] running strategy tuner after dream...");
       try {
         await runStrategyTuner();
