@@ -106,6 +106,7 @@ export const config = {
     watchdogState: join(home, ".juneclaw", "watchdog-state.txt"),
     dreamState: join(home, ".juneclaw", "dream-state.json"),
     tunerState: join(home, ".juneclaw", "tuner-state.json"),
+    externalJobsDir: join(home, ".juneclaw", "jobs.d"),
   },
   subAgents: {
     maxConcurrent: 5,
@@ -162,10 +163,8 @@ export const config = {
       weeklyCompression: "0 1 * * 1",
       monthlyCompression: "0 2 1 * *",
       failureClassification: "0 3 * * *", // daily at 3am
-      // 광수 어드바이스 — 매 3시간 :00 (00/03/06/09/12/15/18/21).
-      // System crontab 대신 JuneClaw daemon 스케줄러 사용 — daemon 이 user
-      // session 에서 돌아 Claude CLI 의 Keychain credentials 접근 가능.
-      gwangsuAdvice: "0 */3 * * *",
+      // gwangsuAdvice and other external jobs moved to ~/.juneclaw/jobs.d/*.json
+      // (registered by src/scheduler/external-jobs.ts).
     } as Record<string, string>,
   },
   strategyTuner: {
