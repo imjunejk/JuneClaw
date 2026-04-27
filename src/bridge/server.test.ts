@@ -1,12 +1,38 @@
 import type { Server } from "node:http";
 import { createHmac } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { startBridge, updateBridgeContext, verifySignupSignature } from "./server.js";
+import {
+  startBridge,
+  updateBridgeContext,
+  verifyHmacSignature,
+  verifyTimestampedHmacSignature,
+} from "./server.js";
 
 const SIGNUP_SECRET = "test-signup-secret-do-not-use";  // test-setup.ts 와 동일
+const MAGIC_SECRET = "test-magic-link-secret-do-not-use";
 
 function signupSig(rawBody: string): string {
   return createHmac("sha256", SIGNUP_SECRET).update(rawBody).digest("hex");
+}
+
+/** Magic webhook 의 timestamped HMAC: hex(HMAC(`${ts}\n${body}`)). */
+function magicSig(rawBody: string, tsSec?: number): { sig: string; ts: string } {
+  const ts = String(tsSec ?? Math.floor(Date.now() / 1000));
+  const sig = createHmac("sha256", MAGIC_SECRET).update(`${ts}\n${rawBody}`).digest("hex");
+  return { sig, ts };
+}
+
+/** Magic webhook 의 표준 헤더 빌드 — 모든 테스트 helper.
+ *  Connection: close — undici keep-alive 가 server.close 사이클과 충돌해 CI 에서
+ *  간헐적 SocketError 를 일으킴. 명시적으로 비활성화. */
+function magicHeaders(rawBody: string, tsSec?: number): Record<string, string> {
+  const { sig, ts } = magicSig(rawBody, tsSec);
+  return {
+    "Content-Type": "application/json",
+    "Connection": "close",
+    "x-signature": sig,
+    "x-timestamp": ts,
+  };
 }
 
 const PORT = Number(process.env.JUNECLAW_BRIDGE_PORT);
@@ -328,33 +354,379 @@ describe("bridge HTTP server", () => {
     });
   });
 
-  describe("verifySignupSignature (pure helper)", () => {
+  describe("POST /webhook/magic-link-send", () => {
+    const magicLink = "https://galleon.market/auth/verify#tk=eyJfake";
+
+    test("valid → 200 + sendToPhone called with link in text", async () => {
+      const body = JSON.stringify({
+        identifier: "+12139992143",
+        kind: "phone",
+        display: "213-999-2143",
+        magic_link: magicLink,
+        ttl_min: 10,
+        requested_at: "2026-04-27T01:00:00.000Z",
+      });
+      const res = await fetch(`${BASE}/webhook/magic-link-send`, {
+        method: "POST",
+        headers: magicHeaders(body),
+        body,
+      });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ ok: true });
+      expect(ctx.sendToPhone).toHaveBeenCalledTimes(1);
+      const [phone, text] = ctx.sendToPhone.mock.calls[0];
+      expect(phone).toBe("+12139992143");
+      expect(text).toContain("🔐 갈레온 로그인 링크");
+      expect(text).toContain(magicLink);
+      expect(text).toContain("10분 안에 탭");
+    });
+
+    test("email kind → ✉️ prefix, sendToPhone with email", async () => {
+      const body = JSON.stringify({
+        identifier: "user@example.com",
+        kind: "email",
+        display: "user@example.com",
+        magic_link: magicLink,
+      });
+      const res = await fetch(`${BASE}/webhook/magic-link-send`, {
+        method: "POST",
+        headers: magicHeaders(body),
+        body,
+      });
+      expect(res.status).toBe(200);
+      const [phone, text] = ctx.sendToPhone.mock.calls[0];
+      expect(phone).toBe("user@example.com");
+      expect(text).toContain("✉️ user@example.com");
+    });
+
+    test("invalid signature → 401, no send", async () => {
+      const body = JSON.stringify({ identifier: "+12139992143", magic_link: magicLink });
+      const res = await fetch(`${BASE}/webhook/magic-link-send`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-signature": "0".repeat(64),
+          "x-timestamp": String(Math.floor(Date.now() / 1000)),
+        },
+        body,
+      });
+      expect(res.status).toBe(401);
+      expect(ctx.sendToPhone).not.toHaveBeenCalled();
+    });
+
+    test("missing identifier → 400", async () => {
+      const body = JSON.stringify({ kind: "phone", magic_link: magicLink });
+      const res = await fetch(`${BASE}/webhook/magic-link-send`, {
+        method: "POST",
+        headers: magicHeaders(body),
+        body,
+      });
+      expect(res.status).toBe(400);
+    });
+
+    test("missing magic_link → 400", async () => {
+      const body = JSON.stringify({ identifier: "+12139992143", kind: "phone" });
+      const res = await fetch(`${BASE}/webhook/magic-link-send`, {
+        method: "POST",
+        headers: magicHeaders(body),
+        body,
+      });
+      expect(res.status).toBe(400);
+    });
+
+    test("non-https magic_link → 400 (anti-spoof)", async () => {
+      const body = JSON.stringify({
+        identifier: "+12139992143",
+        kind: "phone",
+        magic_link: "http://attacker.example.com/phish",
+      });
+      const res = await fetch(`${BASE}/webhook/magic-link-send`, {
+        method: "POST",
+        headers: magicHeaders(body),
+        body,
+      });
+      expect(res.status).toBe(400);
+      expect(ctx.sendToPhone).not.toHaveBeenCalled();
+    });
+
+    test("https but disallowed host → 400 (host allowlist)", async () => {
+      const body = JSON.stringify({
+        identifier: "+12139992143",
+        kind: "phone",
+        magic_link: "https://attacker.example.com/auth/verify#tk=fake",
+      });
+      const res = await fetch(`${BASE}/webhook/magic-link-send`, {
+        method: "POST",
+        headers: magicHeaders(body),
+        body,
+      });
+      expect(res.status).toBe(400);
+      expect(ctx.sendToPhone).not.toHaveBeenCalled();
+    });
+
+    test("CF Pages preview subdomain → 200 (allowlist endsWith)", async () => {
+      const body = JSON.stringify({
+        identifier: "+12139992143",
+        kind: "phone",
+        magic_link: "https://abc123.galleon-market.pages.dev/auth/verify#tk=fake",
+      });
+      const res = await fetch(`${BASE}/webhook/magic-link-send`, {
+        method: "POST",
+        headers: magicHeaders(body),
+        body,
+      });
+      expect(res.status).toBe(200);
+    });
+
+    test("malformed phone identifier → 400", async () => {
+      const body = JSON.stringify({
+        identifier: "not-a-phone",
+        kind: "phone",
+        magic_link: magicLink,
+      });
+      const res = await fetch(`${BASE}/webhook/magic-link-send`, {
+        method: "POST",
+        headers: magicHeaders(body),
+        body,
+      });
+      expect(res.status).toBe(400);
+      expect(ctx.sendToPhone).not.toHaveBeenCalled();
+    });
+
+    test("malformed email identifier → 400", async () => {
+      const body = JSON.stringify({
+        identifier: "no-at-sign",
+        kind: "email",
+        magic_link: magicLink,
+      });
+      const res = await fetch(`${BASE}/webhook/magic-link-send`, {
+        method: "POST",
+        headers: magicHeaders(body),
+        body,
+      });
+      expect(res.status).toBe(400);
+    });
+
+    test("unknown kind → 400 (kind whitelist)", async () => {
+      const body = JSON.stringify({
+        identifier: "+12139992143",
+        kind: "fax",
+        magic_link: magicLink,
+      });
+      const res = await fetch(`${BASE}/webhook/magic-link-send`, {
+        method: "POST",
+        headers: magicHeaders(body),
+        body,
+      });
+      expect(res.status).toBe(400);
+    });
+
+    test("ttl_min out of range → 400", async () => {
+      // 0, 음수, 거대값, NaN 모두 거절
+      for (const ttl of [0, -1, 999, "abc"]) {
+        const body = JSON.stringify({
+          identifier: "+12139992143",
+          kind: "phone",
+          magic_link: magicLink,
+          ttl_min: ttl,
+        });
+        const res = await fetch(`${BASE}/webhook/magic-link-send`, {
+          method: "POST",
+          headers: magicHeaders(body),
+          body,
+        });
+        expect(res.status, `ttl_min=${ttl}`).toBe(400);
+      }
+    });
+
+    test("stale timestamp (>5min old) → 401", async () => {
+      const body = JSON.stringify({
+        identifier: "+12139992143",
+        kind: "phone",
+        magic_link: magicLink,
+      });
+      const staleTs = Math.floor(Date.now() / 1000) - 600;  // 10분 전
+      const res = await fetch(`${BASE}/webhook/magic-link-send`, {
+        method: "POST",
+        headers: magicHeaders(body, staleTs),
+        body,
+      });
+      expect(res.status).toBe(401);
+      expect(ctx.sendToPhone).not.toHaveBeenCalled();
+    });
+
+    test("future timestamp (>1min ahead) → 401", async () => {
+      const body = JSON.stringify({
+        identifier: "+12139992143",
+        kind: "phone",
+        magic_link: magicLink,
+      });
+      const futureTs = Math.floor(Date.now() / 1000) + 600;  // 10분 후
+      const res = await fetch(`${BASE}/webhook/magic-link-send`, {
+        method: "POST",
+        headers: magicHeaders(body, futureTs),
+        body,
+      });
+      expect(res.status).toBe(401);
+    });
+
+    test("missing x-timestamp → 401", async () => {
+      const body = JSON.stringify({
+        identifier: "+12139992143",
+        kind: "phone",
+        magic_link: magicLink,
+      });
+      const { sig } = magicSig(body);
+      const res = await fetch(`${BASE}/webhook/magic-link-send`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-signature": sig,
+          // x-timestamp 일부러 누락
+        },
+        body,
+      });
+      expect(res.status).toBe(401);
+    });
+
+    test("uses MAGIC_LINK_WEBHOOK_SECRET (not SIGNUP)", async () => {
+      // signup secret 으로 서명한 요청은 거절돼야 함 (다른 secret)
+      const body = JSON.stringify({ identifier: "+12139992143", kind: "phone", magic_link: magicLink });
+      const ts = String(Math.floor(Date.now() / 1000));
+      const wrongSig = createHmac("sha256", SIGNUP_SECRET).update(`${ts}\n${body}`).digest("hex");
+      const res = await fetch(`${BASE}/webhook/magic-link-send`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-signature": wrongSig, "x-timestamp": ts },
+        body,
+      });
+      expect(res.status).toBe(401);
+    });
+
+    test("error message does not leak magic_link on send failure", async () => {
+      ctx.sendToPhone.mockRejectedValueOnce(new Error(`failed to send to ${magicLink}`));
+      const body = JSON.stringify({
+        identifier: "+12139992143",
+        kind: "phone",
+        magic_link: magicLink,
+      });
+      const res = await fetch(`${BASE}/webhook/magic-link-send`, {
+        method: "POST",
+        headers: magicHeaders(body),
+        body,
+      });
+      expect(res.status).toBe(500);
+      const text = await res.text();
+      expect(text).not.toContain(magicLink);
+    });
+  });
+
+  describe("verifyTimestampedHmacSignature (pure helper)", () => {
+    const SECRET = "test-magic-link-secret-do-not-use";
+    function tSig(body: string, ts: number): string {
+      return createHmac("sha256", SECRET).update(`${ts}\n${body}`).digest("hex");
+    }
+
+    test("valid sig + fresh ts → ok", () => {
+      const body = '{"x":1}';
+      const ts = 1714000000;
+      const result = verifyTimestampedHmacSignature(body, tSig(body, ts), String(ts), SECRET, { nowSec: ts });
+      expect(result.ok).toBe(true);
+    });
+
+    test("stale ts (skew exceeded) → ts_stale", () => {
+      const body = '{"x":1}';
+      const ts = 1714000000;
+      const result = verifyTimestampedHmacSignature(body, tSig(body, ts), String(ts), SECRET, {
+        nowSec: ts + 600,  // 10분 후
+        skewSec: 300,
+      });
+      expect(result).toEqual({ ok: false, reason: "ts_stale" });
+    });
+
+    test("future ts → ts_future", () => {
+      const body = '{"x":1}';
+      const ts = 1714000000;
+      const result = verifyTimestampedHmacSignature(body, tSig(body, ts), String(ts), SECRET, {
+        nowSec: ts - 120,  // 2분 전
+        futureSec: 60,
+      });
+      expect(result).toEqual({ ok: false, reason: "ts_future" });
+    });
+
+    test("non-numeric ts → ts_format", () => {
+      const result = verifyTimestampedHmacSignature("{}", "0".repeat(64), "abc", SECRET);
+      expect(result).toEqual({ ok: false, reason: "ts_format" });
+    });
+
+    test("array sig header → sig_array", () => {
+      const result = verifyTimestampedHmacSignature("{}", ["a", "b"], "1714000000", SECRET);
+      expect(result).toEqual({ ok: false, reason: "sig_array" });
+    });
+
+    test("array ts header → ts_array", () => {
+      const result = verifyTimestampedHmacSignature("{}", "0".repeat(64), ["1", "2"], SECRET);
+      expect(result).toEqual({ ok: false, reason: "ts_array" });
+    });
+
+    test("body tampering → sig_mismatch", () => {
+      const ts = 1714000000;
+      const sig = tSig('{"x":1}', ts);
+      const result = verifyTimestampedHmacSignature(
+        '{"x":2}',  // body 변조
+        sig,
+        String(ts),
+        SECRET,
+        { nowSec: ts },
+      );
+      expect(result).toEqual({ ok: false, reason: "sig_mismatch" });
+    });
+
+    test("ts tampering breaks sig (timestamp bound to sig input)", () => {
+      const ts = 1714000000;
+      const sig = tSig('{"x":1}', ts);
+      const result = verifyTimestampedHmacSignature(
+        '{"x":1}',
+        sig,
+        String(ts + 1),  // ts 변조 (skew 안엔 들어가지만 sig 가 바뀜)
+        SECRET,
+        { nowSec: ts + 1 },
+      );
+      expect(result).toEqual({ ok: false, reason: "sig_mismatch" });
+    });
+
+    test("empty secret → no_secret", () => {
+      const result = verifyTimestampedHmacSignature("{}", "0".repeat(64), "1714000000", "");
+      expect(result).toEqual({ ok: false, reason: "no_secret" });
+    });
+  });
+
+  describe("verifyHmacSignature (pure helper)", () => {
     test("valid signature → true", () => {
       const body = '{"x":1}';
-      expect(verifySignupSignature(body, signupSig(body), SIGNUP_SECRET)).toBe(true);
+      expect(verifyHmacSignature(body, signupSig(body), SIGNUP_SECRET)).toBe(true);
     });
 
     test("wrong signature → false", () => {
-      expect(verifySignupSignature('{"x":1}', "0".repeat(64), SIGNUP_SECRET)).toBe(false);
+      expect(verifyHmacSignature('{"x":1}', "0".repeat(64), SIGNUP_SECRET)).toBe(false);
     });
 
     test("array header (rare proxy bug) → false", () => {
       const body = '{"x":1}';
-      expect(verifySignupSignature(body, [signupSig(body), signupSig(body)], SIGNUP_SECRET)).toBe(false);
+      expect(verifyHmacSignature(body, [signupSig(body), signupSig(body)], SIGNUP_SECRET)).toBe(false);
     });
 
     test("undefined header → false", () => {
-      expect(verifySignupSignature('{"x":1}', undefined, SIGNUP_SECRET)).toBe(false);
+      expect(verifyHmacSignature('{"x":1}', undefined, SIGNUP_SECRET)).toBe(false);
     });
 
     test("empty secret → false", () => {
-      expect(verifySignupSignature('{"x":1}', signupSig('{"x":1}'), "")).toBe(false);
+      expect(verifyHmacSignature('{"x":1}', signupSig('{"x":1}'), "")).toBe(false);
     });
 
     test("malformed hex → false (early reject)", () => {
       // Hex 가 아닌 char 포함, 길이만 맞춤 (64 char)
       const malformed = "Z".repeat(64);
-      expect(verifySignupSignature('{"x":1}', malformed, SIGNUP_SECRET)).toBe(false);
+      expect(verifyHmacSignature('{"x":1}', malformed, SIGNUP_SECRET)).toBe(false);
     });
   });
 });

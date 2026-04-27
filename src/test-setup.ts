@@ -10,3 +10,4 @@ process.env.HUSTLE_INTERNAL_KEY = process.env.HUSTLE_INTERNAL_KEY ?? "test-key";
 process.env.JUNECLAW_BRIDGE_PORT = process.env.JUNECLAW_BRIDGE_PORT ?? "13200";
 process.env.JUNECLAW_BRIDGE_ALLOW_WRITE = process.env.JUNECLAW_BRIDGE_ALLOW_WRITE ?? "1";
 process.env.JUNECLAW_SIGNUP_WEBHOOK_SECRET = process.env.JUNECLAW_SIGNUP_WEBHOOK_SECRET ?? "test-signup-secret-do-not-use";
+process.env.JUNECLAW_MAGIC_LINK_WEBHOOK_SECRET = process.env.JUNECLAW_MAGIC_LINK_WEBHOOK_SECRET ?? "test-magic-link-secret-do-not-use";
