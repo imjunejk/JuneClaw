@@ -1,0 +1,107 @@
+# INCIDENT — 2026-04-24 02:30 UTC / HEARTBEAT-triggered duplicate trade execution
+
+## What happened
+Two Youngsu/general-session claude instances ran concurrently on the same session
+and both executed June's Option A limit-buy orders. One duplicate MU x3 order
+was created. Cancelled at 02:33 UTC (OID `8be71f60-2d7f-4334-a64d-85b872fbc7c8`,
+204 OK).
+
+## Timeline (UTC)
+- 02:27:43 — June: "옵션 A로 하자. limit buy 로 bid 가 맞춰서 매수 실행해 줄 수 있어?"
+- 02:27:46 — daemon dispatched general worker (job `2-15765`)
+- 02:29:40–02:29:59 — **general worker** placed 6 orders (SNDK/MU/GOOG/NVDA/LRCX/KLAC x1)
+- 02:30:00 — **HEARTBEAT** fired; spawned separate claude invocation
+- 02:32:11 — HEARTBEAT-spawned session re-placed MU x3 (403 for the others — BP already consumed)
+- 02:30:26 — general worker finished; posted "✅ 실행 완료 — Option A"
+- 02:33:xx — HEARTBEAT-spawned session detected duplicate via open-orders scan, cancelled MU dup
+
+## Root cause
+`src/daemon.ts:821` — HEARTBEAT reuses the "general" sessionId (`getSessionId(phone, "general")`)
+and kicks off a new `runClaude` call WITHOUT checking whether a general worker is already
+processing a user message. The `progress-state.json` is written when a general job starts
+(`writeProgressState`) and cleared on completion (`clearProgressState`), but HEARTBEAT
+does not read this file before firing.
+
+Both claude instances then saw the same conversation history (including the unanswered
+user message), so both decided to "execute the plan" independently. The two processes
+did not share an order-placement lock, so each independently hit Alpaca's `/v2/orders`.
+
+## Why my instance re-executed
+- My HEARTBEAT context included the in-progress user message from 02:27:43 and the
+  "작업 진행 중" progress-monitor indicator at 02:28:04, but NOT the general worker's
+  final response (which hadn't been written yet — it posted at 02:30:26).
+- Classified as "pending unanswered request" → proceeded to act on Option A.
+
+## R-E08 connection
+This is the same class of failure as 2026-04-07 (two `remote-control --name juneclaw`
+processes both handling iMessages). R-E08 covers process-level duplication at startup;
+this incident shows the equivalent class within the daemon itself: HEARTBEAT firing
+mid-job spawns a parallel processor on the same session.
+
+## Fix (implemented — JuneClaw PR #57)
+In `src/daemon.ts` `runHeartbeat`, gate against the in-memory `activePhones`
+`Set<string>` that the worker-pool drain already uses for per-phone
+serialization (line 134). This reuses existing state rather than reading
+`progress-state.json` on disk — the drain and the heartbeat both mutate the
+Set synchronously inside the daemon's event loop, so `Set.has` is race-free
+without extra file I/O.
+
+```ts
+// src/heartbeat-gate.ts
+export function evaluateHeartbeat(
+  phone: string,
+  activeWorkers: ReadonlySet<string>,
+): HeartbeatDecision {
+  if (activeWorkers.has(phone)) {
+    return { action: "skip", reason: "worker active for this phone" };
+  }
+  return { action: "run" };
+}
+
+// src/daemon.ts runHeartbeat — gate the claude invocation, not autoDream
+const decision = evaluateHeartbeat(phone, activePhones);
+if (decision.action === "skip") {
+  log(`[heartbeat] skipping claude invocation — ${decision.reason}`);
+} else {
+  activePhones.add(phone);
+  try { /* heartbeat body */ } finally { activePhones.delete(phone); }
+}
+// autoDream runs unconditionally below
+```
+
+Two additional hardenings in PR #57:
+1. **Stateless HEARTBEAT** — removed `getSessionId/setSessionId` for the
+   heartbeat invocation. Even with the gate, session-level reuse meant a
+   future cron could replay unanswered history; stateless makes that
+   impossible by construction.
+2. **Symmetric `try/finally`** — `activePhones.add` is wrapped in a
+   `try/finally` around the full body, matching the worker-pool drain at
+   `daemon.ts:1335/1358`. Either side sees the other as busy via `has()`.
+
+Secondary safeguard (implemented — gwangsu PR #108): shared
+`_order_dedup.py` helper routes every strategy's `POST /v2/orders`
+through two complementary gates:
+
+1. **Pre-submission check** (`recent_duplicate_order`) — scans open
+   orders for a matching `(symbol, side, type)` within 10 min, fail-open
+   on transient API errors, `limit=500` to cover sweeps beyond the
+   Alpaca default of 50.
+2. **Broker-side backstop** (`deterministic_client_order_id`) — builds
+   a coid of the form `{prefix}-{side}-{symbol}-{minute_bucket}` so two
+   racing callers inside the same minute collide at Alpaca (422 duplicate
+   coid), closing the TOCTOU window that the pre-check alone can't.
+
+The `adaptive_autotrader`, `agitq_trader`, `vcp_margin_trader`,
+`sepa_manager`, `pump_swing_trader`, and `tqqq_switch` strategies all
+share the helper — single source of truth instead of six drifting copies.
+
+## Follow-up items
+- [ ] PR to add HEARTBEAT progress-state gate (src/daemon.ts) — JuneClaw PR #57 (activePhones gate + stateless HEARTBEAT + gate test). **Open as of 2026-04-24; flip to `[x]` on merge.**
+- [ ] Add trade-execution idempotency check (gwangsu/algo — shared helper) — gwangsu PR #108 (`_order_dedup.py` shared across 6 strategies; pre-check + deterministic coid). **Open as of 2026-04-24; flip to `[x]` on merge.**
+- [x] ~~Update R-E08 rule text to cover intra-daemon concurrency, not just process-level~~ — workspace `memory/lessons/master-rules.md` updated 2026-04-24
+
+## Orders left in place (1 session)
+SNDK x2 @ $944, MU x3 @ $484.91, GOOG x6 @ $338.15, NVDA x8 @ $199.49,
+LRCX x7 @ $260.25, KLAC x1 @ $1815.55. Total ~$10,604.
+Cron `25 6 24 4 *` scheduled to cancel pre-open (06:25 PT Fri) so 09:56 PT
+auto-rebalance can re-plan with live pricing.
