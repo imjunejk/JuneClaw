@@ -22,7 +22,23 @@ QQQ 200SMA 연속 상회일수가 짧을수록 **불확실성 ↑** → AgiTQ(SG
 폴백 기본값: AgiTQ 20% / SEPA 80%. 드리프트 임계 5%p.
 
 ### SEPA 노티 cap (2026-04-28~)
-`SEPA_BUDGET_CAP=16000` USD (env override, `0`=비활성). 동적 weight × equity 가 cap 초과 시 capped 값을 `vcp_budget`로 사용. SoT는 `portfolio_manager.py:analyze_portfolio()` 한 곳, 모든 다운스트림 (preview / execute / sepa-check / sepa-execute / state save) 자동 전파. 보고되는 `vcp_weight`는 strategy-target % 그대로라 로그에서 weight/$ 불일치 (예: `[SEPA 80%] 배분: $16,000`)로 cap 작동 여부 식별. 도입 사유: $35K equity × 80% weight = $28K SEPA 책정 → 단일 사이클 drift correction에서 buying-power 에러.
+`SEPA_BUDGET_CAP=16000` USD (env override, `0`=비활성). 동적 weight × equity > cap 시 capped → `vcp_intent_budget`. 도입 사유: $35K equity × 80% weight = $28K SEPA 책정 → 단일 사이클 drift correction에서 buying-power 에러.
+
+### SEPA deploy throttle (2026-04-28~)
+`SEPA_DEPLOY_BY_REGIME` — capped intent 중 광7으로 deploy되는 비율 (레짐별):
+
+| Regime | Days above 200SMA | Deploy frac |
+|---|---|---|
+| FULL_BULL | 10+ | 1.00 |
+| BULL_STRONG | 5+ | 1.00 |
+| BULL_WEAK | 3+ | 0.80 |
+| CAUTION | 2+ | 0.50 |
+| EARLY | 1 | 0.25 |
+| BEAR | < SMA | 0.00 |
+
+파이프라인: `equity × vcp_weight → cap → × deploy_frac = vcp_budget` (deploy target). `portfolio_manager.py:analyze_portfolio()`가 SoT, 모든 다운스트림 자동 전파. **나머지 cash로 보유** — SPY/SGOV는 AgiTQ 영역 (AGITQ_SYMBOLS), SEPA 이중 관리 회피. env `SEPA_DEPLOY_MULT` (default 1.0) uniform 스케일링 (0.5 = 모든 레짐 절반). Unknown regime은 1.0 fail-open (로그 확인 필요).
+
+로그 식별: `[SEPA 80% × 배포 50% (CAUTION)] 배분: $8,000 / 의도 $16,000` — weight/deploy/regime 모두 surface.
 
 ## 백테스트 베이스라인
 174종목 유니버스 (11섹터): CAGR +38.9% | Sharpe 1.452 | MDD -30.6% | OOS Sharpe 1.240
