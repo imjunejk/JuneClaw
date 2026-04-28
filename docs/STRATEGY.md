@@ -40,6 +40,15 @@ QQQ 200SMA 연속 상회일수가 짧을수록 **불확실성 ↑** → AgiTQ(SG
 
 로그 식별: `[SEPA 80% × 배포 50% (CAUTION)] 배분: $8,000 / 의도 $16,000` — weight/deploy/regime 모두 surface.
 
+### AgiTQ buying-power reserve (2026-04-28~)
+`agitq_trader.buy_full()`이 SEPA 영역을 침범하지 않도록 `available = max(0, buying_power − SEPA_RESERVE_FOR_AGITQ)`만 사용. default reserve는 `SEPA_BUDGET_CAP` ($16K, env 같이 사용). 12:57 PT AgiTQ market 주문이 12:58 sepa-execute가 쓸 cash를 가져가지 못하도록 보장.
+
+**트레이드오프**: SGOV→TQQQ 같은 AgiTQ 내부 rotation 시 buying_power가 reserve 미만이면 AgiTQ가 축소된 사이즈로만 환매수. AgiTQ 성장은 SEPA가 buying_power를 회수(매도)해야만 가능 — 이게 정확히 정책 의도. env `SEPA_RESERVE_FOR_AGITQ=0`으로 일회성 풀 파워 rotation 가능.
+
+`buy_with_proceeds`는 미적용 (TQQQ 부분 익절 → SPY 환매수에서는 자체 sell 직후 cash라 SEPA와 경쟁 X).
+
+로그: `AgiTQ available $X = buying_power $Y − SEPA reserve $Z`
+
 ## 백테스트 베이스라인
 174종목 유니버스 (11섹터): CAGR +38.9% | Sharpe 1.452 | MDD -30.6% | OOS Sharpe 1.240
 

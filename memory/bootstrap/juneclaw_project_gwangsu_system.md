@@ -26,6 +26,8 @@ QQQ 200SMA 연속 상회일수 기반 비중 자동 조절. SoT: `portfolio_mana
 
 로그 식별: "[SEPA 80% × 배포 50% (CAUTION)] 배분: $8,000 / 의도 $16,000".
 
+**AgiTQ buying-power reserve** (2026-04-28~): `buy_full()`이 `buying_power − SEPA_RESERVE_FOR_AGITQ` (default SEPA_BUDGET_CAP=$16K) 만 사용 → 12:57 AgiTQ market이 12:58 sepa-execute용 cash를 보존. AgiTQ 성장은 SEPA가 cash를 풀어줄 때만 (의도). env `SEPA_RESERVE_FOR_AGITQ=0`으로 비활성.
+
 - AgiTQ: TQQQ 200SMA 2일확인 + BTC 200SMA 필터 + VIX 필터 (25/35) + 익절 20%
 - SEPA V8: TT 8/8 + 점수가중 + 섹터분산 + 품질필터 + Chandelier + Ratchet
 - 매매: portfolio_manager.py가 유일한 매매 주체

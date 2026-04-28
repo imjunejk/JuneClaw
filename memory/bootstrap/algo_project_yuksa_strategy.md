@@ -39,6 +39,8 @@ type: project
 
 로그 식별: `[SEPA 80% × 배포 50% (CAUTION)] 배분: $8,000 / 의도 $16,000`
 
+**AgiTQ buying-power reserve** (2026-04-28~): `agitq_trader.buy_full()`이 `available = max(0, buying_power − SEPA_RESERVE_FOR_AGITQ)`만 spend. default reserve = `SEPA_BUDGET_CAP` ($16K). 12:57 AgiTQ market이 12:58 sepa-execute에 필요한 cash를 selvage 못 가져가도록 차단. env `SEPA_RESERVE_FOR_AGITQ=0`으로 일시 비활성. **트레이드오프**: SGOV→TQQQ rotation 시 AgiTQ 사이즈가 줄어들 수 있음 (의도된 결과 — AgiTQ 성장은 SEPA가 buying_power를 회수해야만 가능). `buy_with_proceeds`는 미적용 (TQQQ 익절 시 SPY 환매수에는 불필요).
+
 ## AgiTQ — TQQQ 200일선 + BTC 필터 + VIX 필터
 - 진입: TQQQ > 200SMA 2일 연속 (env 0%)
 - 퇴출: 200SMA 이탈 즉시
