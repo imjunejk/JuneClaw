@@ -21,6 +21,7 @@ jc rc               # claude --dangerously-skip-permissions + /remote-control �
 - **매일 07:10-12:40 /30min** SEPA breakout_check
 - 동적 비중: BULL_STRONG(10일+)=15/85, BULL(5일+)=20/80, 방어 모드로 점진 축소
 - SEPA 노티 cap: $16,000 (env `SEPA_BUDGET_CAP`, 2026-04-28~) — buying-power 에러 회피
+- SEPA 레짐별 deploy throttle: FULL_BULL/STRONG=100% / WEAK=80% / CAUTION=50% / EARLY=25% / BEAR=0%. 나머지는 cash (SPY/SGOV는 AgiTQ).
 
 ## 주식 거래
 모든 주식 거래는 Alpaca 라이브 계좌 (gwangsu/algo 연동).

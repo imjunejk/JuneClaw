@@ -22,6 +22,14 @@ QQQ 200SMA 연속 상회일수 기반:
 
 **SEPA 노티 cap**: $16,000 (env `SEPA_BUDGET_CAP`, 2026-04-28~). 동적 weight × equity가 cap 초과 시 capped — buying-power 에러 회피.
 
+**SEPA deploy throttle (레짐별)** — capped 예산 중 광7으로 deploy되는 비율:
+- FULL_BULL/BULL_STRONG (5일+) → 100%
+- BULL_WEAK (3일+) → 80%
+- CAUTION (2일+) → 50%
+- EARLY (1일) → 25%
+- BEAR (< 200SMA) → 0% (전량 cash)
+나머지는 cash. SPY/SGOV는 AgiTQ 영역 (AGITQ_SYMBOLS) — SEPA가 안 건드림. env `SEPA_DEPLOY_MULT`로 uniform 스케일링.
+
 - AgiTQ: TQQQ 200SMA 2일확인 + BTC 필터 + VIX 필터 (25/35) + 익절 20%
 - SEPA V8: TT 8/8 + 점수가중 + 섹터분산 + 품질필터 + Chandelier + Ratchet
 - 매매: portfolio_manager.py 유일한 매매 주체

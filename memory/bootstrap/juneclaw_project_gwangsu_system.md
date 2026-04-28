@@ -20,7 +20,11 @@ QQQ 200SMA 연속 상회일수 기반 비중 자동 조절. SoT: `portfolio_mana
 | 2일+ | 40% | 60% |
 | 1일/BEAR | 50% | 50% |
 
-**SEPA 노티 cap**: $16,000 (env `SEPA_BUDGET_CAP`, 2026-04-28~) — buying-power 에러 회피. 동적 weight × equity > cap 시 cap 적용. 로그 "[SEPA 80%] 배분: $16,000" 같은 weight/$ 불일치로 식별.
+**SEPA 노티 cap**: $16,000 (env `SEPA_BUDGET_CAP`, 2026-04-28~) — buying-power 에러 회피. 동적 weight × equity > cap 시 cap 적용.
+
+**SEPA deploy throttle (레짐별)**: capped 예산 → 광7 배포 비율 = FULL_BULL/STRONG 100% / WEAK 80% / CAUTION 50% / EARLY 25% / BEAR 0%. 나머지는 cash (SPY/SGOV는 AgiTQ 전담, 이중 관리 회피). env `SEPA_DEPLOY_MULT` uniform 스케일.
+
+로그 식별: "[SEPA 80% × 배포 50% (CAUTION)] 배분: $8,000 / 의도 $16,000".
 
 - AgiTQ: TQQQ 200SMA 2일확인 + BTC 200SMA 필터 + VIX 필터 (25/35) + 익절 20%
 - SEPA V8: TT 8/8 + 점수가중 + 섹터분산 + 품질필터 + Chandelier + Ratchet
