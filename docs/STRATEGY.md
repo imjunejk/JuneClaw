@@ -21,6 +21,9 @@ QQQ 200SMA 연속 상회일수가 짧을수록 **불확실성 ↑** → AgiTQ(SG
 
 폴백 기본값: AgiTQ 20% / SEPA 80%. 드리프트 임계 5%p.
 
+### SEPA 노티 cap (2026-04-28~)
+`SEPA_BUDGET_CAP=16000` USD (env override, `0`=비활성). 동적 weight × equity 가 cap 초과 시 capped 값을 `vcp_budget`로 사용. SoT는 `portfolio_manager.py:analyze_portfolio()` 한 곳, 모든 다운스트림 (preview / execute / sepa-check / sepa-execute / state save) 자동 전파. 보고되는 `vcp_weight`는 strategy-target % 그대로라 로그에서 weight/$ 불일치 (예: `[SEPA 80%] 배분: $16,000`)로 cap 작동 여부 식별. 도입 사유: $35K equity × 80% weight = $28K SEPA 책정 → 단일 사이클 drift correction에서 buying-power 에러.
+
 ## 백테스트 베이스라인
 174종목 유니버스 (11섹터): CAGR +38.9% | Sharpe 1.452 | MDD -30.6% | OOS Sharpe 1.240
 

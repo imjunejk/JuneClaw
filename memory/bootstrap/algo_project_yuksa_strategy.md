@@ -22,6 +22,8 @@ type: project
 폴백 기본값: AgiTQ 20% / SEPA 80% (`DEFAULT_AGITQ_WEIGHT=0.20`).
 드리프트 임계: 5%p 초과 시 리밸런싱 플래그.
 
+**SEPA 노티 cap** (2026-04-28~): `SEPA_BUDGET_CAP=16000` USD env (`0`=비활성). 동적 weight × equity > cap 시 capped 값을 `vcp_budget`로 사용 — `analyze_portfolio()` 한 곳이 SoT, 다운스트림 (preview / execute / sepa-check / state save) 자동 전파. 보고되는 `vcp_weight`는 strategy-target % 그대로라 로그에서 weight/$ 불일치 ("[SEPA 80%] 배분: $16,000")로 cap 작동 식별. 도입 사유: $35K equity × 80% = $28K → buying-power 에러.
+
 ## AgiTQ — TQQQ 200일선 + BTC 필터 + VIX 필터
 - 진입: TQQQ > 200SMA 2일 연속 (env 0%)
 - 퇴출: 200SMA 이탈 즉시
