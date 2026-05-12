@@ -28,8 +28,16 @@ QQQ 200SMA 연속 상회일수 기반 비중 자동 조절:
   + -10% 하드 스탑
 - 리스크: 서킷브레이커 (WARN -5% / HALT -7% / EMERG -10%, 마진<1.10/1.05/1.02)
 - 매매는 portfolio_manager.py가 통합 관리 (유일한 매매 주체)
-- 크론 (PT): 월 06:20 리밸런싱 | 06:15 sepa_radar scan | 06:31 sepa-scan 알림 |
-  12:50 check | 12:55 sepa-check (리밋) | 12:57 AgiTQ execute | 12:58 sepa-execute (market 전환) | 13:02 agitq-followup
+- **Manual 매매 요청 (재진입/매수/매도 지시) 처리 — 항상 SEPA Radar 경로 사용**:
+  1. \`python3 strategies/portfolio_manager.py --mode sepa-preview\` — fresh plan 생성 (60분 freshness)
+  2. \`python3 strategies/portfolio_manager.py --mode sepa-execute\` — 그 plan 실행
+  3. SEPA Radar Top 10 (composite scoring) 이 single source of truth
+  4. **VCP Margin Trader** (\`sepa_margin_trader.py --mode signal\`, \`vcp_watchlist_alert.py\`)
+     는 informational alert 만 — 매매 결정에 사용 금지
+  5. STOP_LOSS 발동된 날 우회 필요시 \`STOP_LOSS_OVERRIDE=1\` env 명시 (user 의도 확인 후)
+- 크론 (PT): 월 06:20 리밸런싱 | 06:15 sepa_radar scan |
+  06/09/12/15:18 radar-alert | 06/09/12/15:20 sepa-preview |
+  07:30 sepa-intraday | 12:50 sepa-check | 12:58 sepa-execute | 13:02 agitq-followup
 - Alpaca 라이브 계좌, AGITQ_SYMBOLS: {TQQQ, SGOV, SPY, QQQ}
 - 코드: /Users/jp/gwangsu/algo (GitHub: imjunejk/gwangsu)
 - JuneClaw: /Users/jp/JuneClaw
