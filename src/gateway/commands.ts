@@ -10,6 +10,7 @@ import { buildSystemPrompt } from "../memory/loader.js";
 import { listJobs } from "../scheduler/cron.js";
 import { listAgentStatus, cascadeKill } from "../agent/subagents.js";
 import { writeHandoff } from "../memory/handoff.js";
+import { startRelogin } from "../agent/auth-recovery.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -110,6 +111,9 @@ export async function handleCommand(
 
     case "/sepa-reject":
       return { handled: true, response: await sepaRejectCommand() };
+
+    case "/relogin":
+      return { handled: true, response: await startRelogin(phone) };
 
     default:
       return { handled: false };

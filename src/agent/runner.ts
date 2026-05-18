@@ -8,6 +8,9 @@ import {
   CircuitBreaker,
   CircuitBreakerOpenError,
 } from "../lib/circuit-breaker.js";
+import { reportAuthFailure } from "./auth-recovery.js";
+
+const AUTH_FAILURE_RE = /Please run \/login|API Error: 401|socket connection was closed/i;
 
 // ---------------------------------------------------------------------------
 // Per-model circuit breakers — shared across calls for the process lifetime.
@@ -115,6 +118,10 @@ function spawnClaude(args: string[], prompt: string): Promise<string> {
     child.on("close", (code) => {
       clearTimeout(timer);
       if (code !== 0) {
+        const combined = `${stdout}\n${stderr}`;
+        if (AUTH_FAILURE_RE.test(combined)) {
+          reportAuthFailure().catch(() => {});
+        }
         reject(new Error(`claude exited ${code}: ${stderr.slice(0, 500)}`));
       } else {
         resolve(stdout);

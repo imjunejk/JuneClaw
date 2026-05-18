@@ -19,6 +19,7 @@ import { addJob, removeJob, stopAll as stopAllCron } from "./scheduler/cron.js";
 import { startExternalJobsWatcher, type WatcherHandle as ExternalJobsHandle } from "./scheduler/external-jobs.js";
 import { cascadeKill, cleanupStaleAgents, cleanupCompletedAgents } from "./agent/subagents.js";
 import { writeHandoff, writeSmartHandoff } from "./memory/handoff.js";
+import { isAwaitingCode, submitCode, cancelRelogin } from "./agent/auth-recovery.js";
 import { emit } from "./hooks/events.js";
 import { logFromError, inferCategory } from "./hooks/incident.js";
 import { appendSessionSignal } from "./hooks/signals.js";
@@ -485,13 +486,35 @@ async function processMessage(
     log(`[quality] background scoring failed: ${err instanceof Error ? err.message : String(err)}`);
   });
 
-  if (quietMode.get(phone)) {
-    log(`[quiet] skipping message from ${name}`);
-    return;
+  // Auth recovery: bypass quiet checks (user is actively troubleshooting).
+  // Awaiting-code state intercepts the next message as the OAuth code;
+  // explicit /relogin and /cancel pass through to handleCommand below.
+  const trimmedLc = text.trim().toLowerCase();
+  const isAuthFlow =
+    isAwaitingCode(phone) ||
+    trimmedLc === "/relogin" ||
+    trimmedLc === "/cancel";
+
+  if (!isAuthFlow) {
+    if (quietMode.get(phone)) {
+      log(`[quiet] skipping message from ${name}`);
+      return;
+    }
+
+    if (isQuietHour(channelConfig)) {
+      log(`[quiet-hours] skipping message from ${name}`);
+      return;
+    }
   }
 
-  if (isQuietHour(channelConfig)) {
-    log(`[quiet-hours] skipping message from ${name}`);
+  if (isAwaitingCode(phone)) {
+    if (trimmedLc === "/cancel") {
+      await channel.sendMessage(await cancelRelogin(phone));
+      return;
+    }
+    log(`[auth-recovery] received code from ${name}, pasting to tmux`);
+    const result = await submitCode(phone, text);
+    await channel.sendMessage(result);
     return;
   }
 
