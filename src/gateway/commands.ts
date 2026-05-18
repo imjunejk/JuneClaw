@@ -10,6 +10,7 @@ import { buildSystemPrompt } from "../memory/loader.js";
 import { listJobs } from "../scheduler/cron.js";
 import { listAgentStatus, cascadeKill } from "../agent/subagents.js";
 import { writeHandoff } from "../memory/handoff.js";
+import { startRelogin, cancelRelogin } from "../agent/auth-recovery.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -110,6 +111,15 @@ export async function handleCommand(
 
     case "/sepa-reject":
       return { handled: true, response: await sepaRejectCommand() };
+
+    case "/relogin":
+      return { handled: true, response: await startRelogin(phone) };
+
+    case "/cancel":
+      // cancelRelogin is idempotent — returns "no session" if no auth flow is
+      // active, so it's safe to handle here even when daemon's awaiting-code
+      // gate didn't intercept.
+      return { handled: true, response: await cancelRelogin(phone) };
 
     default:
       return { handled: false };

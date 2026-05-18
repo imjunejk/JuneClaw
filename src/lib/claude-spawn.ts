@@ -7,6 +7,9 @@
 
 import { spawn } from "node:child_process";
 import { config } from "../config.js";
+import { reportAuthFailure } from "../agent/auth-recovery.js";
+
+const AUTH_FAILURE_RE = /Please run \/login|API Error: 401|socket connection was closed/i;
 
 export interface ClaudeSpawnOptions {
   /** Timeout in milliseconds. Defaults to config.dream.timeoutMs. */
@@ -59,6 +62,10 @@ export function spawnClaudePrint(
       settled = true;
       if (code !== 0) {
         // claude CLI prints model/auth errors to stdout, not stderr — include both.
+        const combined = `${stdout}\n${stderr}`;
+        if (AUTH_FAILURE_RE.test(combined)) {
+          reportAuthFailure().catch(() => {});
+        }
         const detail = (stderr.trim() || stdout.trim() || "(no output)").slice(0, 500);
         reject(new Error(`claude --print exited ${code}: ${detail}`));
       } else {

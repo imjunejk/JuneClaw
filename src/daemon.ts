@@ -19,6 +19,7 @@ import { addJob, removeJob, stopAll as stopAllCron } from "./scheduler/cron.js";
 import { startExternalJobsWatcher, type WatcherHandle as ExternalJobsHandle } from "./scheduler/external-jobs.js";
 import { cascadeKill, cleanupStaleAgents, cleanupCompletedAgents } from "./agent/subagents.js";
 import { writeHandoff, writeSmartHandoff } from "./memory/handoff.js";
+import { isAwaitingCode, submitCode, cancelRelogin } from "./agent/auth-recovery.js";
 import { emit } from "./hooks/events.js";
 import { logFromError, inferCategory } from "./hooks/incident.js";
 import { appendSessionSignal } from "./hooks/signals.js";
@@ -485,13 +486,39 @@ async function processMessage(
     log(`[quality] background scoring failed: ${err instanceof Error ? err.message : String(err)}`);
   });
 
-  if (quietMode.get(phone)) {
-    log(`[quiet] skipping message from ${name}`);
-    return;
+  // Auth recovery: bypass quiet checks (user is actively troubleshooting).
+  // Awaiting-code state intercepts the next message as the OAuth code;
+  // /relogin and /cancel are slash commands that pass through to handleCommand.
+  //
+  // Cache isAwaitingCode result so the TTL boundary can't shift between the
+  // bypass decision and the paste handler.
+  const trimmedLc = text.trim().toLowerCase();
+  const awaitingCode = isAwaitingCode(phone);
+  const isAuthFlow =
+    awaitingCode ||
+    trimmedLc === "/relogin" ||
+    trimmedLc === "/cancel";
+
+  if (!isAuthFlow) {
+    if (quietMode.get(phone)) {
+      log(`[quiet] skipping message from ${name}`);
+      return;
+    }
+
+    if (isQuietHour(channelConfig)) {
+      log(`[quiet-hours] skipping message from ${name}`);
+      return;
+    }
   }
 
-  if (isQuietHour(channelConfig)) {
-    log(`[quiet-hours] skipping message from ${name}`);
+  if (awaitingCode) {
+    if (trimmedLc === "/cancel") {
+      await channel.sendMessage(await cancelRelogin(phone));
+      return;
+    }
+    log(`[auth-recovery] received code from ${name}, pasting to tmux`);
+    const result = await submitCode(phone, text);
+    await channel.sendMessage(result);
     return;
   }
 
@@ -1189,6 +1216,47 @@ export async function startDaemon(): Promise<void> {
 
           // User message → override quiet hours for 1 hour (per-channel)
           quietHoursOverrideUntil.set(chConfig.phone, Date.now() + 60 * 60 * 1000);
+
+          // ── Pre-classify intercepts ──
+          // Slash commands and auth-recovery state must bypass classifyTask —
+          // otherwise the classifier may route them to the quick lane and the
+          // LLM tries to "answer" the command instead of executing it.
+          {
+            const trimmedRaw = msg.text.trim();
+            const trimmedLc = trimmedRaw.toLowerCase();
+
+            // Auth recovery: in awaiting-code state, any non-/cancel message
+            // is the OAuth code paste; /cancel aborts.
+            if (isAwaitingCode(chConfig.phone)) {
+              if (trimmedLc === "/cancel") {
+                await ch.sendMessage(await cancelRelogin(chConfig.phone));
+              } else {
+                log(`[auth-recovery] received code from ${chConfig.name}, pasting`);
+                const result = await submitCode(chConfig.phone, msg.text);
+                await ch.sendMessage(result);
+              }
+              continue;
+            }
+
+            // Slash commands: route through handleCommand. If handleCommand
+            // doesn't know the command (returns handled:false), fall through
+            // to normal classification so the LLM can respond.
+            if (trimmedRaw.startsWith("/")) {
+              try {
+                const cmdResult = await handleCommand(msg.text, chConfig.phone);
+                if (cmdResult.handled) {
+                  if (cmdResult.response) await ch.sendMessage(cmdResult.response);
+                  continue;
+                }
+              } catch (err) {
+                logError("[command] handler threw", err);
+                await ch.sendMessage(
+                  `❌ 커맨드 실행 오류: ${err instanceof Error ? err.message : String(err)}`,
+                );
+                continue;
+              }
+            }
+          }
 
           // Restricted channels always route to "general"
           let taskType: TaskType;
