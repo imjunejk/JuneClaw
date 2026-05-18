@@ -37,17 +37,46 @@ const TIMINGS = {
 };
 
 /**
- * Match the OAuth URL claude CLI prints. Covers both `*.anthropic.com` and
- * `claude.ai/oauth/*` (Anthropic has shipped OAuth flows on both hostnames).
+ * Match the OAuth URL claude CLI prints. Requires `/oauth/` (or `/cai/oauth/`)
+ * path segment to filter doc/marketing URLs in startup banners.
+ *
+ * Observed hostnames (across CLI versions): anthropic.com, claude.ai,
+ * claude.com. We accept all three.
+ *
+ * Terminal wrap is a real problem — even with `tmux capture-pane -J`, long
+ * URLs that hit ~80-col wrap arrive with literal newlines/spaces in the
+ * middle. `extractOauthUrl()` strips whitespace from the candidate region
+ * before matching.
  */
-const URL_RE = /https?:\/\/[^\s)>"]*(?:anthropic|claude\.ai)[^\s)>"]*/i;
+const URL_RE = /https?:\/\/(?:[a-z0-9-]+\.)?(?:anthropic\.com|claude\.ai|claude\.com)\/(?:cai\/)?oauth\/[^\s)>"]+/i;
+
+/** Pattern signalling the URL is somewhere on screen, even if line-wrapped. */
+const URL_HOSTNAME_RE = /https?:\/\/(?:[a-z0-9-]+\.)?(?:anthropic\.com|claude\.ai|claude\.com)/i;
 
 /**
- * Definitive success markers. Intentionally narrow — broader patterns like
- * "Logged in as <user>" can appear as leftover lines from a previous session
- * and cause false positives.
+ * First-run wizard screens that need Enter to advance. Observed sequence:
+ *   1. "Quick safety check" — trust this folder
+ *   2. Theme picker (Dark / Light / etc.)
+ *   3. "Select login method" — Claude subscription / Anthropic Console / 3rd
+ * Order is not stable across CLI versions, so the state machine just
+ * matches whichever one is currently on screen.
  */
-const SUCCESS_RE = /Logged in successfully|Authentication successful|login complete|setup complete/i;
+const WIZARD_SCREEN_RE = /Quick safety check|Is this a project you|trust this folder|Syntax theme|Light mode \(ANSI|Dark mode|Select login method|Claude account with subscription/i;
+
+/** Main interactive prompt is ready (creds were already valid). */
+const MAIN_PROMPT_RE = /Try ".+"|auto mode on|shift\+tab to cycle/i;
+
+/**
+ * Definitive success markers — printed after a fresh OAuth code is accepted.
+ * Observed in claude CLI v2.1:
+ *   "Login successful. Press Enter to continue…"
+ *   "Logged in as <email>"
+ * Both appear together on the success screen; matching either is reliable
+ * (we wipe the tmux session immediately after, so leftover-line false
+ * positives can't occur on the next /relogin).
+ */
+const SUCCESS_RE = /Logged in successfully|Authentication successful|login complete|setup complete|Login successful\.\s*Press Enter|Logged in as \S+@\S+/i;
+
 const FAILURE_RE = /Invalid code|code expired|authentication failed|access denied/i;
 
 interface ReloginState {
@@ -99,8 +128,10 @@ async function tmuxKill(): Promise<void> {
 
 async function tmuxCapture(): Promise<string> {
   try {
+    // `-J` joins wrapped lines so a long OAuth URL doesn't split across rows
+    // and break URL_RE. `-S -100` includes 100 lines of scrollback.
     const { stdout } = await execFileAsync("tmux", [
-      "capture-pane", "-t", TMUX_SESSION, "-p", "-S", "-100",
+      "capture-pane", "-t", TMUX_SESSION, "-p", "-J", "-S", "-100",
     ]);
     return stdout;
   } catch {
@@ -121,6 +152,81 @@ async function tmuxPasteThenEnter(text: string): Promise<void> {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * Pull the OAuth URL out of a captured pane.
+ *
+ * Wrap handling: even with `tmux capture-pane -J`, long URLs frequently
+ * arrive split by literal newlines + leading whitespace. A "direct" regex
+ * match would only grab the first segment before the break. So we always
+ * locate the hostname, take a generous tail (OAuth URLs are <1KB), strip
+ * whitespace, and match against the strict URL pattern.
+ */
+function extractOauthUrl(pane: string): string | null {
+  const hostHit = pane.match(URL_HOSTNAME_RE);
+  if (!hostHit || hostHit.index == null) return null;
+  const tail = pane.slice(hostHit.index, hostHit.index + 2000);
+  const collapsed = tail.replace(/\s+/g, "");
+  const m = collapsed.match(URL_RE);
+  return m ? m[0] : null;
+}
+
+/**
+ * Drive the spawned `claude` TUI through whatever sequence of wizard
+ * screens it shows until either an OAuth URL appears or we give up.
+ *
+ * Policy: every spawn forces a fresh OAuth round (token refresh) rather
+ * than short-circuiting on "already logged in". This is intentional — if
+ * the user typed /relogin, they want a new token, not a courtesy ack.
+ *
+ * Loop state machine:
+ *   - URL on screen          → return URL (done)
+ *   - wizard screen          → press Enter, re-poll
+ *   - main prompt, no URL    → type /login, re-poll
+ *   - nothing recognized     → keep polling until budget exhausted
+ */
+async function driveLoginWizard(maxStepMs = 30_000): Promise<{
+  url: string | null;
+  lastPane: string;
+}> {
+  const overallDeadline = Date.now() + maxStepMs;
+  let loginSent = false;
+  let lastPane = "";
+
+  // Initial wait for claude TUI to render anything.
+  await sleep(TIMINGS.claudeStartMs);
+
+  while (Date.now() < overallDeadline) {
+    lastPane = await tmuxCapture();
+
+    // Highest priority: URL on screen — done.
+    const url = extractOauthUrl(lastPane);
+    if (url) return { url, lastPane };
+
+    // Wizard screen detected (trust / theme / login-method) → press Enter
+    // to accept default and advance.
+    if (WIZARD_SCREEN_RE.test(lastPane)) {
+      await execFileAsync("tmux", ["send-keys", "-t", TMUX_SESSION, "Enter"]);
+      await sleep(TIMINGS.urlPollIntervalMs);
+      continue;
+    }
+
+    // Main prompt reached without seeing wizard screens (creds already
+    // valid). Send /login once to force the OAuth flow.
+    if (MAIN_PROMPT_RE.test(lastPane) && !loginSent) {
+      await tmuxPasteThenEnter("/login");
+      loginSent = true;
+      await sleep(TIMINGS.urlPollIntervalMs);
+      continue;
+    }
+
+    // Unknown screen — keep polling. Possible causes: claude still
+    // rendering, or first frame hasn't drawn yet.
+    await sleep(TIMINGS.urlPollIntervalMs);
+  }
+
+  return { url: null, lastPane };
+}
+
 export async function startRelogin(phone: string): Promise<string> {
   // Reject if another phone is mid-recovery — concurrent sessions would let
   // their codes cross-paste into the wrong claude process.
@@ -140,29 +246,16 @@ export async function startRelogin(phone: string): Promise<string> {
     return `❌ tmux 세션 생성 실패: ${err instanceof Error ? err.message : String(err)}`;
   }
 
-  await sleep(TIMINGS.claudeStartMs);
-  try {
-    await tmuxPasteThenEnter("/login");
-  } catch (err) {
-    await tmuxKill();
-    return `❌ /login 전송 실패: ${err instanceof Error ? err.message : String(err)}`;
-  }
-
-  let url: string | undefined;
-  let lastPane = "";
-  for (let i = 0; i < TIMINGS.urlPollAttempts; i++) {
-    await sleep(TIMINGS.urlPollIntervalMs);
-    lastPane = await tmuxCapture();
-    const m = lastPane.match(URL_RE);
-    if (m) { url = m[0]; break; }
-  }
+  const { url, lastPane } = await driveLoginWizard();
 
   if (!url) {
     await tmuxKill();
     return [
-      "❌ /login URL 추출 실패.",
+      "❌ OAuth URL 추출 실패.",
+      "다음 시도 시 daemon 로그 확인: ~/.juneclaw/logs/daemon.log",
+      "",
       "마지막 화면 (디버그):",
-      lastPane.slice(-400) || "(empty)",
+      lastPane.slice(-600) || "(empty)",
     ].join("\n");
   }
 

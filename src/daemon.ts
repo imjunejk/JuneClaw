@@ -1217,6 +1217,47 @@ export async function startDaemon(): Promise<void> {
           // User message → override quiet hours for 1 hour (per-channel)
           quietHoursOverrideUntil.set(chConfig.phone, Date.now() + 60 * 60 * 1000);
 
+          // ── Pre-classify intercepts ──
+          // Slash commands and auth-recovery state must bypass classifyTask —
+          // otherwise the classifier may route them to the quick lane and the
+          // LLM tries to "answer" the command instead of executing it.
+          {
+            const trimmedRaw = msg.text.trim();
+            const trimmedLc = trimmedRaw.toLowerCase();
+
+            // Auth recovery: in awaiting-code state, any non-/cancel message
+            // is the OAuth code paste; /cancel aborts.
+            if (isAwaitingCode(chConfig.phone)) {
+              if (trimmedLc === "/cancel") {
+                await ch.sendMessage(await cancelRelogin(chConfig.phone));
+              } else {
+                log(`[auth-recovery] received code from ${chConfig.name}, pasting`);
+                const result = await submitCode(chConfig.phone, msg.text);
+                await ch.sendMessage(result);
+              }
+              continue;
+            }
+
+            // Slash commands: route through handleCommand. If handleCommand
+            // doesn't know the command (returns handled:false), fall through
+            // to normal classification so the LLM can respond.
+            if (trimmedRaw.startsWith("/")) {
+              try {
+                const cmdResult = await handleCommand(msg.text, chConfig.phone);
+                if (cmdResult.handled) {
+                  if (cmdResult.response) await ch.sendMessage(cmdResult.response);
+                  continue;
+                }
+              } catch (err) {
+                logError("[command] handler threw", err);
+                await ch.sendMessage(
+                  `❌ 커맨드 실행 오류: ${err instanceof Error ? err.message : String(err)}`,
+                );
+                continue;
+              }
+            }
+          }
+
           // Restricted channels always route to "general"
           let taskType: TaskType;
           if (chConfig.accessLevel === "general") {
