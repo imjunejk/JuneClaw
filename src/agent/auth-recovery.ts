@@ -2,12 +2,14 @@
  * iMessage-driven /login recovery.
  *
  * Flow:
- *   1. /relogin     → spawn `claude` in tmux, send /login, capture OAuth URL, reply.
- *   2. user texts code → paste into the same tmux session, capture pane, confirm.
+ *   1. /relogin           → spawn `claude` in tmux, send /login, capture OAuth URL, reply.
+ *   2. user texts code    → paste into the same tmux session, capture pane, confirm.
+ *   3. user texts /cancel → kill session, clear state.
  *
  * State (one in-flight session per phone, 5-min TTL) lives in-memory; daemon
- * restart cancels. Tmux session name is shared because we only support one
- * concurrent recovery — simpler than tracking per-phone sessions.
+ * restart cancels. Only one phone can recover at a time — the tmux session
+ * name is shared because allowing concurrent recoveries would let phone B's
+ * spawned claude receive phone A's OAuth code (session hijack).
  */
 
 import { execFile } from "node:child_process";
@@ -19,9 +21,34 @@ const execFileAsync = promisify(execFile);
 const TMUX_SESSION = "auth-recovery";
 const STATE_TTL_MS = 5 * 60_000;
 
-const URL_RE = /https?:\/\/[^\s)>"]*anthropic[^\s)>"]*/i;
-const SUCCESS_RE = /Logged in|successfully|success|login complete|✓/i;
-const FAILURE_RE = /Invalid|expired|error|denied|failed/i;
+/**
+ * Tunable timings. Defaults assume `claude` CLI startup + OAuth code exchange
+ * complete within these windows. Override via env for flaky machines.
+ */
+const TIMINGS = {
+  /** Delay between `tmux new-session` and `/login` keystroke (claude startup). */
+  claudeStartMs: 2500,
+  /** Per-attempt poll wait when scraping the pane for the OAuth URL. */
+  urlPollIntervalMs: 2000,
+  /** How many poll attempts before giving up on URL extraction. */
+  urlPollAttempts: 4,
+  /** Wait after pasting OAuth code, before reading pane for success/failure. */
+  codeExchangeMs: 5000,
+};
+
+/**
+ * Match the OAuth URL claude CLI prints. Covers both `*.anthropic.com` and
+ * `claude.ai/oauth/*` (Anthropic has shipped OAuth flows on both hostnames).
+ */
+const URL_RE = /https?:\/\/[^\s)>"]*(?:anthropic|claude\.ai)[^\s)>"]*/i;
+
+/**
+ * Definitive success markers. Intentionally narrow — broader patterns like
+ * "Logged in as <user>" can appear as leftover lines from a previous session
+ * and cause false positives.
+ */
+const SUCCESS_RE = /Logged in successfully|Authentication successful|login complete|setup complete/i;
+const FAILURE_RE = /Invalid code|code expired|authentication failed|access denied/i;
 
 interface ReloginState {
   startedAt: number;
@@ -38,6 +65,19 @@ export function isAwaitingCode(phone: string): boolean {
     return false;
   }
   return true;
+}
+
+/** Returns the phone that currently has an in-flight recovery, or null. */
+function getActiveOtherPhone(excludePhone: string): string | null {
+  for (const [phone, s] of states) {
+    if (phone === excludePhone) continue;
+    if (Date.now() > s.expiresAt) {
+      states.delete(phone);
+      continue;
+    }
+    return phone;
+  }
+  return null;
 }
 
 function setState(phone: string): void {
@@ -68,13 +108,27 @@ async function tmuxCapture(): Promise<string> {
   }
 }
 
-async function tmuxSendKeys(keys: string): Promise<void> {
-  await execFileAsync("tmux", ["send-keys", "-t", TMUX_SESSION, keys, "Enter"]);
+/**
+ * Send a literal string then Enter as separate commands. The `-l` flag tells
+ * tmux to treat keys as literal characters, so an OAuth code that happens to
+ * contain tokens like "Enter" / "Tab" / "C-c" can't be interpreted as key
+ * events.
+ */
+async function tmuxPasteThenEnter(text: string): Promise<void> {
+  await execFileAsync("tmux", ["send-keys", "-t", TMUX_SESSION, "-l", text]);
+  await execFileAsync("tmux", ["send-keys", "-t", TMUX_SESSION, "Enter"]);
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 export async function startRelogin(phone: string): Promise<string> {
+  // Reject if another phone is mid-recovery — concurrent sessions would let
+  // their codes cross-paste into the wrong claude process.
+  const other = getActiveOtherPhone(phone);
+  if (other) {
+    return `❌ 다른 사용자 (${other}) 의 /relogin 진행 중. 완료/만료 후 재시도.`;
+  }
+
   await tmuxKill();
   try {
     await execFileAsync("tmux", [
@@ -86,20 +140,18 @@ export async function startRelogin(phone: string): Promise<string> {
     return `❌ tmux 세션 생성 실패: ${err instanceof Error ? err.message : String(err)}`;
   }
 
-  // Wait for claude to render its prompt.
-  await sleep(2500);
+  await sleep(TIMINGS.claudeStartMs);
   try {
-    await tmuxSendKeys("/login");
+    await tmuxPasteThenEnter("/login");
   } catch (err) {
     await tmuxKill();
     return `❌ /login 전송 실패: ${err instanceof Error ? err.message : String(err)}`;
   }
 
-  // Poll up to ~8s for URL to appear in pane.
   let url: string | undefined;
   let lastPane = "";
-  for (let i = 0; i < 4; i++) {
-    await sleep(2000);
+  for (let i = 0; i < TIMINGS.urlPollAttempts; i++) {
+    await sleep(TIMINGS.urlPollIntervalMs);
     lastPane = await tmuxCapture();
     const m = lastPane.match(URL_RE);
     if (m) { url = m[0]; break; }
@@ -133,15 +185,14 @@ export async function submitCode(phone: string, code: string): Promise<string> {
   }
 
   try {
-    await tmuxSendKeys(code.trim());
+    await tmuxPasteThenEnter(code.trim());
   } catch (err) {
     clearState(phone);
     await tmuxKill();
     return `❌ paste 실패 (세션 죽었음): ${err instanceof Error ? err.message : String(err)}`;
   }
 
-  // Wait for OAuth exchange to complete.
-  await sleep(5000);
+  await sleep(TIMINGS.codeExchangeMs);
   const pane = await tmuxCapture();
   clearState(phone);
   await tmuxKill();
@@ -165,6 +216,10 @@ export async function submitCode(phone: string, code: string): Promise<string> {
   ].join("\n");
 }
 
+/**
+ * Idempotent: returns a different message when no session is active so /cancel
+ * can be safely routed for every phone without side-effects.
+ */
 export async function cancelRelogin(phone: string): Promise<string> {
   if (!isAwaitingCode(phone)) {
     return "진행 중인 /relogin 세션 없음";
@@ -181,8 +236,13 @@ let lastAlertAt = 0;
 
 /**
  * Best-effort iMessage alert when daemon detects 401/auth failure.
- * Deduped to one message per 30 min so retries don't spam.
- * Independent of Claude — uses `imsg` CLI directly.
+ *
+ * Single-recipient by design — only June (full-access owner) receives this.
+ * Other channels (e.g. 햄톨) don't own the auth token and can't recover it.
+ *
+ * Dedups to one message per 30 min so a retry storm doesn't spam.
+ * Independent of Claude — uses `imsg` CLI directly so it still works while
+ * Claude itself is failing.
  */
 export async function reportAuthFailure(): Promise<void> {
   const now = Date.now();
@@ -202,4 +262,12 @@ export async function reportAuthFailure(): Promise<void> {
   } catch {
     // best-effort
   }
+}
+
+// ── Test-only helpers ──────────────────────────────────────────────────────
+
+/** Reset all module state. Test-only. */
+export function _resetForTests(): void {
+  states.clear();
+  lastAlertAt = 0;
 }

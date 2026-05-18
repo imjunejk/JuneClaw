@@ -488,10 +488,14 @@ async function processMessage(
 
   // Auth recovery: bypass quiet checks (user is actively troubleshooting).
   // Awaiting-code state intercepts the next message as the OAuth code;
-  // explicit /relogin and /cancel pass through to handleCommand below.
+  // /relogin and /cancel are slash commands that pass through to handleCommand.
+  //
+  // Cache isAwaitingCode result so the TTL boundary can't shift between the
+  // bypass decision and the paste handler.
   const trimmedLc = text.trim().toLowerCase();
+  const awaitingCode = isAwaitingCode(phone);
   const isAuthFlow =
-    isAwaitingCode(phone) ||
+    awaitingCode ||
     trimmedLc === "/relogin" ||
     trimmedLc === "/cancel";
 
@@ -507,7 +511,7 @@ async function processMessage(
     }
   }
 
-  if (isAwaitingCode(phone)) {
+  if (awaitingCode) {
     if (trimmedLc === "/cancel") {
       await channel.sendMessage(await cancelRelogin(phone));
       return;
